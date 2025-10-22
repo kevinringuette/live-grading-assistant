@@ -294,46 +294,92 @@ function GradingInterface() {
     const chunkNum = ++chunkIdRef.current;
     const blob = new Blob(currentChunks, { type: 'audio/webm' });
     const entryId = Date.now();
-    setTranscript(prev => [...prev, { id: entryId, text: `[Processing chunk #${chunkNum}...]`, isProcessing: true }]);
+    setTranscript(prev => [...prev, { id: entryId, text: `⏳ Chunk ${chunkNum} pending...`, isProcessing: true }]);
     setPendingCount(prev => prev + 1);
 
     try {
       const base64 = await blobToBase64(blob);
+      const filename = `chunk-${Date.now()}.webm`;
+      
+      const roster = students.map(s => ({
+        id: s.id,
+        studentId: s.studentId,
+        name: s.name,
+        email: s.email
+      }));
+      
       const payload = {
-        sessionId,
-        chunkNumber: chunkNum,
-        audioBase64: base64,
-        rubricItems,
-        students: students.map(s => ({ id: s.id, name: s.name })),
-        currentGrades: grades,
-        teacherName: selectedTeacher?.name,
-        sectionName: selectedSection?.name,
-        assignmentName
+        audio: {
+          filename,
+          mimeType: 'audio/webm',
+          encoding: 'base64',
+          data: base64
+        },
+        session: {
+          id: sessionId || '',
+          assignment: assignmentName || '',
+          teacherName: selectedTeacher?.name || '',
+          teacherEmail: selectedTeacher?.email || '',
+          teacherId: selectedTeacher?.id || '',
+          sectionName: selectedSection?.name || '',
+          sectionId: selectedSection?.id || ''
+        },
+        rubric: rubricItems,
+        roster
       };
+      
       const response = await fetch(CONFIG.N8N_WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      if (!response.ok) throw new Error(`n8n error: ${response.status}`);
-      const result = await response.json();
-      setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: result.transcript || '[No transcript]', isProcessing: false } : e));
-      if (result.updates) {
-        setGrades(prev => {
-          const next = { ...prev };
-          result.updates.forEach(upd => {
-            const sid = upd.studentId;
-            if (next[sid]) {
-              next[sid] = { ...next[sid], ...upd.data };
-            }
-          });
-          return next;
-        });
+      
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => 'Unknown error');
+        throw new Error(`n8n webhook error (${response.status}): ${errorText}`);
       }
-      if (result.currentStudent) setCurrentStudent(result.currentStudent);
+      
+      const result = await response.json();
+      
+      // Process the result
+      if (result && (result.studentName || result.studentId) && result.scores) {
+        let student = null;
+        if (result.studentId) {
+          student = students.find(s => s.studentId?.toString() === String(result.studentId)) ||
+                    students.find(s => s.id === result.studentId);
+        }
+        if (!student && result.studentName) {
+          const target = String(result.studentName).trim().toLowerCase();
+          student = students.find(s => (s.name || '').trim().toLowerCase() === target);
+        }
+
+        if (student) {
+          const line = `${student.name}. ${Object.entries(result.scores).map(([k, v]) => `${k} ${v}`).join(', ')}${result.comments ? `. ${result.comments}` : ''}`;
+          setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: line, isProcessing: false } : e));
+          
+          // Apply the grade
+          setGrades(prev => ({
+            ...prev,
+            [student.id]: {
+              scores: { ...prev[student.id].scores, ...result.scores },
+              comments: result.comments || prev[student.id].comments,
+              completed: true
+            }
+          }));
+          setCurrentStudent(student.name);
+        } else {
+          setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: result.transcript || `Processed chunk ${chunkNum} (no matching student found).`, isProcessing: false } : e));
+        }
+      } else {
+        setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: result.transcript || `Chunk ${chunkNum} processed.`, isProcessing: false } : e));
+      }
+      
     } catch (err) {
       console.error('Processing error:', err);
-      setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: `[Error: ${err.message}]`, isProcessing: false } : e));
+      const errorMessage = err.message.includes('n8n') 
+        ? `n8n webhook error - Check your webhook is running and configured correctly: ${err.message}`
+        : `Processing error: ${err.message}`;
+      setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: `❌ ${errorMessage}`, isProcessing: false } : e));
     } finally {
       setPendingCount(prev => Math.max(0, prev - 1));
       isFlushingRef.current = false;
@@ -665,31 +711,17 @@ function GradingInterface() {
             </div>
 
             <div className="mb-6">
-              <label className="block text-sm font-medium text-gray-700 mb-2">Student Order (drag to reorder)</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Students in Section</label>
               <div className="space-y-2 max-h-64 overflow-y-auto bg-gray-50 rounded-lg p-4">
-                {orderedStudents.map((student, idx) => (
+                {students.map((student, idx) => (
                   <div key={student.id} className="flex items-center gap-3 bg-white p-3 rounded-lg border border-gray-200">
-                    <div className="flex flex-col gap-1">
-                      <button
-                        onClick={() => moveStudent(student.id, 'up')}
-                        disabled={idx === 0}
-                        className="p-1 hover:bg-gray-100 rounded disabled:opacity-30"
-                      >
-                        <Icon name="chevron-up" className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => moveStudent(student.id, 'down')}
-                        disabled={idx === orderedStudents.length - 1}
-                        className="p-1 hover:bg-gray-100 rounded disabled:opacity-30"
-                      >
-                        <Icon name="chevron-down" className="w-4 h-4" />
-                      </button>
+                    <div className="w-10 h-10 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-semibold">
+                      {getInitials(student.name)}
                     </div>
                     <div className="flex-1">
                       <p className="font-medium text-gray-900">{student.name}</p>
                       <p className="text-xs text-gray-500">ID: {student.studentId}</p>
                     </div>
-                    <span className="text-sm text-gray-400">#{idx + 1}</span>
                   </div>
                 ))}
               </div>
