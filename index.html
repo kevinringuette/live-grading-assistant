@@ -14,7 +14,7 @@
 <div id="root"></div>
 
 <script type="text/babel">
-const { useState, useEffect, useRef } = React;
+const { useState, useEffect, useRef, useMemo } = React;
 
 const CONFIG = {
   AIRTABLE_API_KEY: 'patCUB0HwqgJr9nOr.d93cc816ba0e0dc0c22bbe5eaada139d84f864256b401446d1c2726da1247b4f',
@@ -57,11 +57,17 @@ function GradingInterface() {
   const [step, setStep] = useState('teacher-select');
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
+
   const [teachers, setTeachers] = useState([]);
+  const [teacherQuery, setTeacherQuery] = useState('');
   const [selectedTeacher, setSelectedTeacher] = useState(null);
+
   const [sections, setSections] = useState([]);
+  const [sectionQuery, setSectionQuery] = useState('');
   const [selectedSection, setSelectedSection] = useState(null);
+
   const [students, setStudents] = useState([]);
+  const [studentOrder, setStudentOrder] = useState([]); // display order
   const [assignmentName, setAssignmentName] = useState('');
   const [rubricItems, setRubricItems] = useState([
     { name: 'Correctness', maxPoints: 25 },
@@ -71,14 +77,20 @@ function GradingInterface() {
   ]);
   const [grades, setGrades] = useState({});
   const [currentStudent, setCurrentStudent] = useState(null);
+
+  // Transcript entries: { id, text, isProcessing }
   const [transcript, setTranscript] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [editingStudent, setEditingStudent] = useState(null);
   const [editingField, setEditingField] = useState(null);
-  const [processingAudio, setProcessingAudio] = useState(false);
   const [sessionId, setSessionId] = useState(null);
   const [micError, setMicError] = useState(null);
+
+  // background upload tracking
+  const [pendingCount, setPendingCount] = useState(0);
+  const chunkIdRef = useRef(0);
+  const isFlushingRef = useRef(false); // short lock for stop->restart only
 
   // MediaRecorder refs
   const mediaRecorderRef = useRef(null);
@@ -105,12 +117,12 @@ function GradingInterface() {
       if (isTyping) return;
       if (e.code === 'Space' && isRecording && !editingStudent) {
         e.preventDefault();
-        processCurrentAudioChunk();
+        processCurrentAudioChunk(); // fire-and-forget
       }
     };
     window.addEventListener('keydown', handleKeyPress);
     return () => window.removeEventListener('keydown', handleKeyPress);
-  }, [isRecording, editingStudent, rubricItems, students, grades, selectedTeacher, selectedSection, assignmentName, sessionId, processingAudio]);
+  }, [isRecording, editingStudent, rubricItems, students, grades, selectedTeacher, selectedSection, assignmentName, sessionId]);
 
   const airtableRequest = async (endpoint, options = {}) => {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${endpoint}`;
@@ -136,7 +148,7 @@ function GradingInterface() {
         name: record.fields[CONFIG.FIELDS.TEACHERS.NAME]
           || `${record.fields[CONFIG.FIELDS.TEACHERS.FIRST_NAME] || ''} ${record.fields[CONFIG.FIELDS.TEACHERS.LAST_NAME] || ''}`.trim(),
         email: record.fields[CONFIG.FIELDS.TEACHERS.EMAIL]
-      }));
+      })).sort((a,b) => a.name.localeCompare(b.name));
       setTeachers(teachersList);
     } catch (err) {
       console.error('Error loading teachers:', err);
@@ -145,6 +157,15 @@ function GradingInterface() {
       setLoading(false);
     }
   };
+
+  const filteredTeachers = useMemo(() => {
+    const q = teacherQuery.trim().toLowerCase();
+    if (!q) return teachers;
+    return teachers.filter(t =>
+      (t.name || '').toLowerCase().includes(q) ||
+      (t.email || '').toLowerCase().includes(q)
+    );
+  }, [teachers, teacherQuery]);
 
   const selectTeacher = async (teacher) => {
     setSelectedTeacher(teacher);
@@ -166,7 +187,8 @@ function GradingInterface() {
         id: data.id,
         name: data.fields[CONFIG.FIELDS.SECTIONS.NAME] || 'Unnamed Section',
         studentCount: data.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER]?.length || 0
-      }));
+      }))
+      .sort((a,b) => a.name.localeCompare(b.name));
       setSections(sectionsList);
     } catch (err) {
       console.error('Error loading sections:', err);
@@ -175,6 +197,12 @@ function GradingInterface() {
       setLoading(false);
     }
   };
+
+  const filteredSections = useMemo(() => {
+    const q = sectionQuery.trim().toLowerCase();
+    if (!q) return sections;
+    return sections.filter(s => (s.name || '').toLowerCase().includes(q));
+  }, [sections, sectionQuery]);
 
   const selectSection = async (section) => {
     setSelectedSection(section);
@@ -193,6 +221,7 @@ function GradingInterface() {
         studentId: data.fields[CONFIG.FIELDS.STUDENTS.ID]?.toString() || 'N/A'
       }));
       setStudents(studentsList);
+      setStudentOrder(studentsList.map(s => s.id));
       const initialGrades = {};
       studentsList.forEach(student => {
         initialGrades[student.id] = { scores: {}, comments: '', completed: false };
@@ -206,7 +235,7 @@ function GradingInterface() {
     }
   };
 
-  // === REAL RECORDING ===
+  // === RECORDING ===
   const startRecording = async () => {
     try {
       setTranscript([]);
@@ -233,7 +262,7 @@ function GradingInterface() {
       };
 
       mediaRecorderRef.current = mr;
-      mr.start(); // continuous recording; SPACE will stop to flush a chunk and then restart
+      mr.start(); // continuous recording
     } catch (err) {
       console.error(err);
       setMicError('Microphone permission denied or unsupported browser.');
@@ -255,19 +284,18 @@ function GradingInterface() {
     }
   };
 
+  // fire-and-forget chunk processing
   const processCurrentAudioChunk = async () => {
-    if (processingAudio) return;
     if (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive') {
       setError('Recorder is not active. Click the mic to start.');
       return;
     }
+    if (isFlushingRef.current) return; // brief protection during stop/restart
 
-    setProcessingAudio(true);
-    setTranscript(prev => [...prev, { text: '⏳ Processing...', isProcessing: true }]);
+    isFlushingRef.current = true;
 
+    // wait for stop -> capture blob
     const mr = mediaRecorderRef.current;
-
-    // Wait for stop -> gather blob -> restart recording
     const blobPromise = new Promise((resolve) => {
       const handleStop = () => {
         mr.removeEventListener('stop', handleStop);
@@ -280,13 +308,32 @@ function GradingInterface() {
 
     try {
       const blob = await blobPromise;
+      // immediately restart for the next student
+      chunksRef.current = [];
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive') {
+        mediaRecorderRef.current.start();
+        setIsRecording(true);
+      }
+      isFlushingRef.current = false;
 
-      // Convert to base64 for JSON transport
+      // enqueue background upload
+      const localChunkId = ++chunkIdRef.current;
+      setPendingCount((c) => c + 1);
+      setTranscript(prev => [...prev, { id: localChunkId, text: `⏳ Chunk ${localChunkId} pending…`, isProcessing: true }]);
+
+      uploadChunk(blob, localChunkId);
+    } catch (err) {
+      console.error('Chunk flush failed:', err);
+      isFlushingRef.current = false;
+      setTranscript(prev => [...prev, { id: ++chunkIdRef.current, text: '❌ Error capturing chunk.', isProcessing: false }]);
+    }
+  };
+
+  const uploadChunk = async (blob, localChunkId) => {
+    try {
       const base64 = await blobToBase64(blob);
       const filename = `chunk-${Date.now()}.webm`;
 
-      // 👇👇👇 ADDED: include roster (from already-loaded students) in the payload
-      // Keep it lean so payloads stay small.
       const roster = students.map(s => ({
         id: s.id,
         studentId: s.studentId,
@@ -306,12 +353,12 @@ function GradingInterface() {
           assignment: assignmentName || '',
           teacherName: selectedTeacher?.name || '',
           teacherEmail: selectedTeacher?.email || '',
-          teacherId: selectedTeacher?.id || '',     // 👈 ADDED
+          teacherId: selectedTeacher?.id || '',
           sectionName: selectedSection?.name || '',
-          sectionId: selectedSection?.id || ''      // 👈 ADDED
+          sectionId: selectedSection?.id || ''
         },
         rubric: rubricItems,
-        roster               // 👈 ADDED
+        roster
       };
 
       let result = null;
@@ -322,77 +369,84 @@ function GradingInterface() {
           body: JSON.stringify(payload)
         });
         if (!res.ok) throw new Error(`n8n error ${res.status}`);
-        // Expect JSON like: { studentName, studentId?, scores: {...}, comments, transcript }
-        result = await res.json();
+        result = await res.json(); // { studentName, studentId?, scores, comments, transcript }
       } catch (err) {
         console.error('JSON upload failed:', err);
       }
 
-      // Resume continuous recording for next chunk
-      try {
-        chunksRef.current = [];
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive') {
-          mediaRecorderRef.current.start();
-          setIsRecording(true);
-        }
-      } catch (e) {
-        console.warn('Failed to restart recorder:', e);
-      }
-
-      // Use webhook output or fall back to simulator
       if (result && (result.studentName || result.studentId) && result.scores) {
         let student = null;
-
         if (result.studentId) {
           student = students.find(s => s.studentId?.toString() === String(result.studentId)) ||
                     students.find(s => s.id === result.studentId);
         }
         if (!student && result.studentName) {
-          student = students.find(s => s.name?.trim().toLowerCase() === String(result.studentName).trim().toLowerCase());
+          const target = String(result.studentName).trim().toLowerCase();
+          student = students.find(s => (s.name || '').trim().toLowerCase() === target);
         }
 
         if (student) {
-          setCurrentStudent(student.name);
-          setTranscript(prev => prev
-            .filter(t => !t.isProcessing)
-            .concat({
-              text: `${student.name}. ${Object.entries(result.scores).map(([k, v]) => `${k} ${v}`).join(', ')}${result.comments ? `. ${result.comments}` : ''}`
-            }));
-          setGrades(prev => ({
-            ...prev,
-            [student.id]: {
-              scores: result.scores || {},
-              comments: result.comments || '',
-              completed: true
-            }
-          }));
+          const line = `${student.name}. ${Object.entries(result.scores).map(([k, v]) => `${k} ${v}`).join(', ')}${result.comments ? `. ${result.comments}` : ''}`;
+          replaceTranscript(localChunkId, line, false);
+          applyGrade(student.id, result.scores || {}, result.comments || '');
         } else {
-          setTranscript(prev => prev
-            .filter(t => !t.isProcessing)
-            .concat({ text: result.transcript || 'Processed audio (no matching student found).' }));
+          replaceTranscript(localChunkId, result.transcript || `Processed chunk ${localChunkId} (no matching student found).`, false);
         }
       } else {
-        // Fallback to simulation
-        setTranscript(prev => prev.filter(t => !t.isProcessing));
+        // fallback simulate
+        replaceTranscript(localChunkId, `Chunk ${localChunkId} processed (simulated).`, false);
         simulateNextStudent();
       }
     } catch (err) {
       console.error('Processing failed:', err);
-      setTranscript(prev => prev.filter(t => !t.isProcessing).concat({
-        text: '❌ Error processing audio. Check webhook and CORS.'
-      }));
+      replaceTranscript(localChunkId, `❌ Error processing chunk ${localChunkId}. Check webhook and CORS.`, false);
     } finally {
-      setProcessingAudio(false);
+      setPendingCount((c) => Math.max(0, c - 1));
+    }
+  };
+
+  const replaceTranscript = (id, text, isProcessing) => {
+    setTranscript(prev =>
+      prev.map(entry => entry.id === id ? { ...entry, text, isProcessing } : entry)
+    );
+  };
+
+  // move a student one position down in the visible order when graded
+  const bumpStudentDown = (studentId) => {
+    setStudentOrder(prev => {
+      const idx = prev.indexOf(studentId);
+      if (idx === -1 || idx === prev.length - 1) return prev; // already last or not found
+      const next = [...prev];
+      [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+      return next;
+    });
+  };
+
+  const applyGrade = (studentId, scores, comments) => {
+    setGrades(prev => {
+      const updated = {
+        ...prev,
+        [studentId]: { scores: scores || {}, comments: comments || '', completed: true }
+      };
+    return updated;
+    });
+    const student = students.find(s => s.id === studentId);
+    if (student) {
+      setCurrentStudent(student.name);
+      bumpStudentDown(studentId);
     }
   };
 
   const simulateNextStudent = () => {
-    const ungraded = students.filter(s => !grades[s.id]?.completed);
-    if (ungraded.length === 0) {
-      setTranscript(prev => [...prev, { text: '✅ All students graded!' }]);
+    const ungradedIds = studentOrder.filter(id => !grades[id]?.completed);
+    if (ungradedIds.length === 0) {
+      setTranscript(prev => [...prev, { id: ++chunkIdRef.current, text: '✅ All students graded!', isProcessing: false }]);
       return;
     }
-    const nextStudent = ungraded[0];
+    const nextId = ungradedIds[0];
+    const nextStudent = students.find(s => s.id === nextId);
+    if (!nextStudent) return;
+
     setCurrentStudent(nextStudent.name);
     const baseScores = [23, 22, 24, 21];
     const randomScores = rubricItems.reduce((acc, item, idx) => {
@@ -405,18 +459,10 @@ function GradingInterface() {
       'Solid performance overall.',
       'Outstanding analysis and methodology.'
     ];
-    const comment = comments[ungraded.indexOf(nextStudent) % comments.length];
-    setTranscript(prev => [...prev, {
-      text: `${nextStudent.name}. ${Object.entries(randomScores).map(([k, v]) => `${k} ${v}`).join(', ')}. ${comment}`
-    }]);
-    setGrades(prev => ({
-      ...prev,
-      [nextStudent.id]: {
-        scores: randomScores,
-        comments: comment,
-        completed: true
-      }
-    }));
+    const comment = comments[ungradedIds.indexOf(nextId) % comments.length];
+
+    setTranscript(prev => [...prev, { id: ++chunkIdRef.current, text: `${nextStudent.name}. ${Object.entries(randomScores).map(([k, v]) => `${k} ${v}`).join(', ')}. ${comment}`, isProcessing: false }]);
+    applyGrade(nextId, randomScores, comment);
   };
 
   const saveToAirtable = async () => {
@@ -472,7 +518,7 @@ function GradingInterface() {
   };
   const calculateTotal = (sg) => sg.scores ? Object.values(sg.scores).reduce((sum, s) => sum + (s || 0), 0) : 0;
   const calculateMaxTotal = () => rubricItems.reduce((sum, item) => sum + (item.maxPoints || 0), 0);
-  const getInitials = (name) => name.split(' ').map(n => n[0]).join('');
+  const getInitials = (name) => (name || '').split(' ').map(n => n[0]).join('');
   const updateScore = (studentId, rubricItem, newScore) => {
     const maxPoints = rubricItems.find(i => i.name === rubricItem)?.maxPoints || 0;
     const validScore = Math.max(0, Math.min(newScore, maxPoints));
@@ -493,29 +539,50 @@ function GradingInterface() {
   if (step === 'teacher-select') {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="max-w-2xl w-full mx-auto px-6">
+        <div className="max-w-3xl w-full mx-auto px-6">
           <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-8">
             <h1 className="text-3xl font-bold text-gray-900 mb-2">Live Grading Assistant</h1>
             <p className="text-gray-600 mb-6">Select your teacher profile</p>
             {error && <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg"><p className="text-sm text-red-800">{error}</p></div>}
+
+            <div className="mb-3 flex items-center gap-2">
+              <div className="relative flex-1">
+                <input
+                  type="text"
+                  value={teacherQuery}
+                  onChange={(e) => setTeacherQuery(e.target.value)}
+                  onKeyDown={(e)=>{ if(e.key==='Enter' && filteredTeachers[0]) selectTeacher(filteredTeachers[0]); }}
+                  placeholder="Type to find your name or email…"
+                  className="w-full px-4 py-3 pl-10 border border-gray-300 rounded-lg"
+                />
+                <div className="absolute left-3 top-3.5"><Icon name="search" className="w-4 h-4 text-gray-400"/></div>
+              </div>
+              <span className="text-xs text-gray-500 whitespace-nowrap">{filteredTeachers.length} shown</span>
+            </div>
+
             {loading ? (
               <div className="text-center py-8">
                 <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-                <p className="text-gray-500 mt-4">Loading...</p>
+                <p className="text-gray-500 mt-4">Loading…</p>
               </div>
             ) : (
-              <div className="space-y-3">
-                {teachers.map(teacher => (
-                  <button key={teacher.id} onClick={() => selectTeacher(teacher)} className="w-full text-left p-4 border border-gray-200 rounded-lg hover:border-blue-400 hover:bg-blue-50">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-96 overflow-y-auto">
+                {filteredTeachers.map(teacher => (
+                  <button key={teacher.id} onClick={() => selectTeacher(teacher)} className="text-left p-3 border border-gray-200 rounded-lg hover:border-blue-400 hover:bg-blue-50">
                     <div className="flex items-center justify-between">
-                      <div>
-                        <p className="font-semibold text-gray-900">{teacher.name}</p>
-                        <p className="text-sm text-gray-500">{teacher.email}</p>
+                      <div className="min-w-0">
+                        <p className="font-semibold text-gray-900 truncate">{teacher.name}</p>
+                        <p className="text-xs text-gray-500 truncate">{teacher.email}</p>
                       </div>
-                      <Icon name="play" />
+                      <Icon name="chevron-right" />
                     </div>
                   </button>
                 ))}
+                {filteredTeachers.length === 0 && (
+                  <div className="col-span-full text-sm text-gray-500 p-4 bg-gray-50 rounded-lg">
+                    No matches. Try typing a last name or email.
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -527,24 +594,41 @@ function GradingInterface() {
   if (step === 'class-select') {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="max-w-2xl w-full mx-auto px-6">
+        <div className="max-w-3xl w-full mx-auto px-6">
           <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-8">
             <button onClick={() => setStep('teacher-select')} className="text-blue-600 hover:text-blue-700 mb-4 text-sm">← Back</button>
             <h1 className="text-3xl font-bold text-gray-900 mb-2">Select Your Class</h1>
-            <p className="text-gray-600 mb-6">Teacher: {selectedTeacher?.name}</p>
-            {loading ? <div className="text-center py-8"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div></div> : (
-              <div className="space-y-3">
-                {sections.map(section => (
+            <p className="text-gray-600 mb-4">Teacher: {selectedTeacher?.name}</p>
+
+            <div className="mb-4 relative">
+              <input
+                type="text"
+                value={sectionQuery}
+                onChange={(e)=>setSectionQuery(e.target.value)}
+                placeholder="Filter sections…"
+                className="w-full px-4 py-3 pl-10 border border-gray-300 rounded-lg"
+              />
+              <div className="absolute left-3 top-3.5"><Icon name="filter" className="w-4 h-4 text-gray-400"/></div>
+            </div>
+
+            {loading ? (
+              <div className="text-center py-8"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div></div>
+            ) : (
+              <div className="space-y-2 max-h-96 overflow-y-auto">
+                {filteredSections.map(section => (
                   <button key={section.id} onClick={() => selectSection(section)} className="w-full text-left p-4 border border-gray-200 rounded-lg hover:border-blue-400 hover:bg-blue-50">
                     <div className="flex items-center justify-between">
-                      <div>
-                        <p className="font-semibold text-gray-900">{section.name}</p>
-                        <p className="text-sm text-gray-500">{section.studentCount} students</p>
+                      <div className="min-w-0">
+                        <p className="font-semibold text-gray-900 truncate">{section.name}</p>
+                        <p className="text-xs text-gray-500">{section.studentCount} students</p>
                       </div>
-                      <Icon name="play" />
+                      <Icon name="chevron-right" />
                     </div>
                   </button>
                 ))}
+                {filteredSections.length === 0 && (
+                  <div className="text-sm text-gray-500 p-4 bg-gray-50 rounded-lg">No sections match your filter.</div>
+                )}
               </div>
             )}
           </div>
@@ -607,15 +691,22 @@ function GradingInterface() {
   }
 
   // Grading
+  const orderedStudents = studentOrder.map(id => students.find(s => s.id === id)).filter(Boolean);
+
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b border-gray-200 px-6 py-4">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">{assignmentName || 'Untitled Assignment'}</h1>
-            <p className="text-sm text-gray-500 mt-1">{selectedTeacher?.name} - {selectedSection?.name}</p>
+          <div className="min-w-0">
+            <h1 className="text-2xl font-bold text-gray-900 truncate">{assignmentName || 'Untitled Assignment'}</h1>
+            <p className="text-sm text-gray-500 mt-1 truncate">{selectedTeacher?.name} - {selectedSection?.name}</p>
           </div>
-          <div className="flex gap-3">
+          <div className="flex items-center gap-4">
+            {pendingCount > 0 && (
+              <div className="text-xs text-orange-700 bg-orange-100 border border-orange-200 rounded px-2 py-1">
+                {pendingCount} chunk{pendingCount>1?'s':''} uploading…
+              </div>
+            )}
             <button onClick={() => setStep('setup')} className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Back</button>
             <button onClick={saveToAirtable} className="flex items-center gap-2 px-4 py-2 text-white bg-green-600 hover:bg-green-700 rounded-lg">
               <Icon name="download" className="w-4 h-4" /> Save to Airtable
@@ -637,16 +728,15 @@ function GradingInterface() {
                   <Icon name={isRecording ? 'square' : 'mic'} className="w-8 h-8 text-white" />
                 </button>
                 <div className="text-center">
-                  <p className="text-sm font-medium text-gray-900">{isRecording ? 'Recording...' : 'Ready'}</p>
+                  <p className="text-sm font-medium text-gray-900">{isRecording ? 'Recording…' : 'Ready'}</p>
                   <p className="text-2xl font-mono text-gray-600 mt-2">{formatTime(recordingTime)}</p>
                   {currentStudent && <p className="text-sm text-blue-600 font-medium mt-2">Currently: {currentStudent}</p>}
-                  {processingAudio && <p className="text-sm text-orange-600 font-medium mt-2 animate-pulse">⏳ Processing...</p>}
                   {micError && <p className="text-xs text-red-600 mt-2">{micError}</p>}
                 </div>
                 {isRecording && (
-                  <div className="mt-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
+                  <div className="mt-2 p-3 bg-blue-50 rounded-lg border border-blue-200 w-full">
                     <p className="text-xs font-semibold text-blue-900 mb-1">How to use:</p>
-                    <p className="text-xs text-blue-800">🎤 Speak assessment<br/>⌨️ Press SPACE to process current student<br/>⏳ Wait a moment<br/>🔄 Continues recording for next student</p>
+                    <p className="text-xs text-blue-800">🎤 Speak assessment<br/>⌨️ Press SPACE to flush a chunk (upload continues in background)<br/>🔄 Recording resumes instantly for next student</p>
                   </div>
                 )}
               </div>
@@ -672,10 +762,10 @@ function GradingInterface() {
               <h2 className="text-lg font-semibold text-gray-900 mb-4">Transcript</h2>
               <div className="h-96 overflow-y-auto bg-gray-50 rounded p-4 text-sm">
                 {transcript.length === 0 ? (
-                  <p className="text-gray-400 italic">{isRecording ? 'Press SPACEBAR to process...' : 'Start recording'}</p>
+                  <p className="text-gray-400 italic">{isRecording ? 'Press SPACEBAR to process…' : 'Start recording'}</p>
                 ) : (
-                  transcript.map((entry, idx) => (
-                    <p key={idx} className={`mb-3 ${entry.isProcessing ? 'text-orange-600 animate-pulse' : ''}`}>{entry.text}</p>
+                  transcript.map((entry) => (
+                    <p key={entry.id} className={`mb-3 ${entry.isProcessing ? 'text-orange-600 animate-pulse' : ''}`}>{entry.text}</p>
                   ))
                 )}
               </div>
@@ -688,30 +778,22 @@ function GradingInterface() {
                 Student Progress ({Object.values(grades).filter(g => g.completed).length}/{students.length})
               </h2>
               <div className="space-y-3">
-                {students.sort((a, b) => {
-                  if (currentStudent === a.name) return -1;
-                  if (currentStudent === b.name) return 1;
-                  const aC = grades[a.id]?.completed || false;
-                  const bC = grades[b.id]?.completed || false;
-                  if (aC && !bC) return 1;
-                  if (!aC && bC) return -1;
-                  return 0;
-                }).map((student) => {
+                {orderedStudents.map((student, idx) => {
                   const sg = grades[student.id] || { scores: {}, comments: '', completed: false };
                   const total = calculateTotal(sg);
                   const colors = ['bg-blue-100 text-blue-600', 'bg-green-100 text-green-600', 'bg-purple-100 text-purple-600', 'bg-orange-100 text-orange-600'];
-                  const colorClass = colors[students.indexOf(student) % 4];
+                  const colorClass = colors[idx % 4];
 
                   return (
-                    <div key={student.id} className={`border rounded-lg p-4 ${currentStudent === student.name ? 'border-blue-500 bg-blue-50 shadow-md' : sg.completed ? 'border-green-300 bg-green-50' : 'border-gray-200'}`}>
+                    <div key={student.id} className={`border rounded-lg p-4 transition-all ${currentStudent === student.name ? 'border-blue-500 bg-blue-50 shadow-md' : sg.completed ? 'border-green-300 bg-green-50' : 'border-gray-200'}`}>
                       <div className="flex items-start justify-between mb-3">
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-3 min-w-0">
                           <div className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold ${colorClass}`}>
                             {getInitials(student.name)}
                           </div>
-                          <div>
-                            <p className="font-semibold text-gray-900">{student.name}</p>
-                            <p className="text-xs text-gray-500">ID: {student.studentId}</p>
+                          <div className="min-w-0">
+                            <p className="font-semibold text-gray-900 truncate">{student.name}</p>
+                            <p className="text-xs text-gray-500 truncate">ID: {student.studentId}</p>
                           </div>
                         </div>
                         <div className="text-right">
@@ -722,7 +804,7 @@ function GradingInterface() {
                       <div className="grid grid-cols-4 gap-2 mb-3">
                         {rubricItems.map(item => {
                           const isEditing = editingStudent === student.id && editingField === item.name;
-                          const score = sg.scores[item.name] || 0;
+                          const score = sg.scores[item.name] ?? '';
                           return (
                             <div key={item.name} className="text-center p-2 bg-white rounded border border-gray-200">
                               <p className="text-xs text-gray-600 truncate mb-1">{item.name}</p>
@@ -744,7 +826,7 @@ function GradingInterface() {
                                   className={`text-lg font-semibold cursor-pointer hover:bg-blue-50 rounded px-1 ${sg.completed ? 'text-gray-900' : 'text-gray-400'}`}
                                   title="Click to edit"
                                 >
-                                  {score || '--'}
+                                  {sg.scores[item.name] ?? '--'}
                                 </p>
                               )}
                               <p className="text-xs text-gray-500">/ {item.maxPoints}</p>
@@ -783,7 +865,7 @@ function GradingInterface() {
                             className="text-sm text-gray-700 cursor-pointer hover:bg-blue-100 rounded p-1"
                             title="Click to edit"
                           >
-                            {sg.comments || 'Click to add comments...'}
+                            {sg.comments || 'Click to add comments…'}
                           </p>
                         )}
                       </div>
