@@ -6,11 +6,11 @@ import { Mic, Square, Settings, Upload, Download, Plus, Trash2, Play } from 'luc
 // ============================================================================
 const CONFIG = {
   // Your Airtable Configuration
-  AIRTABLE_API_KEY: 'YOUR_AIRTABLE_API_KEY_HERE',
-  AIRTABLE_BASE_ID: 'YOUR_BASE_ID_HERE', // e.g., 'appTwYDVvnYPB8D2N'
+  AIRTABLE_API_KEY: 'patCUB0HwqgJr9nOr.ab696a1c2674dbab6d5c447011caecdc6a545751332aca30bcf9a0160f9100c6',
+  AIRTABLE_BASE_ID: 'appTwYDVvnYPB8D2N', // e.g., 'appTwYDVvnYPB8D2N'
   
   // Your n8n Webhook URL
-  N8N_WEBHOOK_URL: 'YOUR_N8N_WEBHOOK_URL_HERE', // e.g., 'https://your-n8n.com/webhook/grading'
+  N8N_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook-test/voice-grader', // e.g., 'https://your-n8n.com/webhook/grading'
   
   // Airtable Table Names (update if your table names are different)
   TABLES: {
