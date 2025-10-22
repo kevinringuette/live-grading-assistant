@@ -285,6 +285,15 @@ function GradingInterface() {
       const base64 = await blobToBase64(blob);
       const filename = `chunk-${Date.now()}.webm`;
 
+      // 👇👇👇 ADDED: include roster (from already-loaded students) in the payload
+      // Keep it lean so payloads stay small.
+      const roster = students.map(s => ({
+        id: s.id,
+        studentId: s.studentId,
+        name: s.name,
+        email: s.email
+      }));
+
       const payload = {
         audio: {
           filename,
@@ -297,9 +306,12 @@ function GradingInterface() {
           assignment: assignmentName || '',
           teacherName: selectedTeacher?.name || '',
           teacherEmail: selectedTeacher?.email || '',
-          sectionName: selectedSection?.name || ''
+          teacherId: selectedTeacher?.id || '',     // 👈 ADDED
+          sectionName: selectedSection?.name || '',
+          sectionId: selectedSection?.id || ''      // 👈 ADDED
         },
-        rubric: rubricItems
+        rubric: rubricItems,
+        roster               // 👈 ADDED
       };
 
       let result = null;
