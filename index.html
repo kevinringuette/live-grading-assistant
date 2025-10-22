@@ -54,7 +54,11 @@ const blobToBase64 = (blob) =>
     reader.onerror = reject;
     reader.readAsDataURL(blob);
   });
-
+function chunk(arr, size = 10) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+};  
 function GradingInterface() {
   const [step, setStep] = useState('teacher-select');
   const [isRecording, setIsRecording] = useState(false);
@@ -470,29 +474,72 @@ function GradingInterface() {
   const saveToAirtable = async () => {
     setLoading(true);
     try {
-      const gradeRecords = Object.entries(grades)
-        .filter(([_, data]) => data.completed)
-        .map(([studentId, data]) => {
-          const fields = {
-            [CONFIG.FIELDS.GRADES.STUDENT]: [studentId],
-            [CONFIG.FIELDS.GRADES.COMMENTS]: data.comments,
-            [CONFIG.FIELDS.GRADES.FINAL_GRADE]: calculateTotal(data)
-          };
-          rubricItems.forEach(item => { fields[item.name] = data.scores[item.name] || 0; });
-          return { fields };
-        });
-
-      if (gradeRecords.length === 0) {
+      // 1) pick only completed students
+      const completed = Object.entries(grades).filter(([_, g]) => g.completed);
+      if (completed.length === 0) {
         alert('No completed grades to save yet.');
         setLoading(false);
         return;
       }
-
-      await airtableRequest(CONFIG.TABLES.GRADES, {
-        method: 'POST',
-        body: JSON.stringify({ records: gradeRecords })
+  
+      // 2) build Grade records
+      const gradeRecords = completed.map(([studentRecordId, g]) => {
+        const fields = {
+          [CONFIG.FIELDS.GRADES.STUDENT]: [studentRecordId],          // link → Student Roster (record id)
+          [CONFIG.FIELDS.GRADES.COMMENTS]: g.comments,
+          [CONFIG.FIELDS.GRADES.FINAL_GRADE]: calculateTotal(g),
+  
+          // If these exist in your Grades table (plain text or linked), keep them:
+          [CONFIG.FIELDS.GRADES.ASSIGNMENT]: assignmentName || '',
+          'Teacher Name': selectedTeacher?.name || '',
+          'Section Name': selectedSection?.name || ''
+          // If Teacher/Section/Assignment are linked fields instead of text,
+          // pass their RECORD IDs here rather than names.
+        };
+        return { _studentRecordId: studentRecordId, fields };
       });
-      alert('Successfully saved grades!');
+  
+      // 3) POST Grades in batches of 10; collect returned Grade IDs
+      const gradeIdByStudent = {};
+      for (const batch of chunk(gradeRecords, 10)) {
+        const res = await airtableRequest(CONFIG.TABLES.GRADES, {
+          method: 'POST',
+          body: JSON.stringify({ records: batch.map(b => ({ fields: b.fields })) })
+        });
+        res.records.forEach((rec, i) => {
+          const studentRecordId = batch[i]._studentRecordId;
+          gradeIdByStudent[studentRecordId] = rec.id;
+        });
+      }
+  
+      // 4) Build Grade Scores rows (one per rubric item)
+      const scoreRows = [];
+      for (const [studentRecordId, g] of completed) {
+        const gradeId = gradeIdByStudent[studentRecordId];
+        if (!gradeId) continue;
+  
+        rubricItems.forEach(item => {
+          const score = g.scores[item.name] ?? 0;
+          scoreRows.push({
+            fields: {
+              [CONFIG.FIELDS.GRADE_SCORES.GRADE]: [gradeId],     // link → Grades
+              [CONFIG.FIELDS.GRADE_SCORES.LABEL]: item.name,     // “Correctness”, “Method”, etc.
+              [CONFIG.FIELDS.GRADE_SCORES.SCORE]: score,         // number
+              [CONFIG.FIELDS.GRADE_SCORES.MAX]: item.maxPoints ?? null
+            }
+          });
+        });
+      }
+  
+      // 5) POST Grade Scores in batches of 10
+      for (const batch of chunk(scoreRows, 10)) {
+        await airtableRequest(CONFIG.TABLES.GRADE_SCORES, {
+          method: 'POST',
+          body: JSON.stringify({ records: batch })
+        });
+      }
+  
+      alert('Successfully saved grades and rubric scores!');
     } catch (err) {
       console.error('Error saving:', err);
       alert('Error saving to Airtable.');
