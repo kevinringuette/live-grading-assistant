@@ -130,17 +130,31 @@
                 setStep('class-select');
                 setError(null);
                 try {
-                    const filterFormula = `SEARCH("${teacher.id}", ARRAYJOIN({${CONFIG.FIELDS.SECTIONS.TEACHER_LINK}}))`;
+                    // Teacher Link is an array of record IDs, so we need to check if teacher.id is in that array
+                    const filterFormula = `FIND("${teacher.id}", ARRAYJOIN({Teacher Link}))`;
+                    console.log('Filter formula:', filterFormula);
+                    
                     const data = await airtableRequest(`${CONFIG.TABLES.SECTIONS}?filterByFormula=${encodeURIComponent(filterFormula)}`);
+                    console.log('Sections data:', data);
+                    
+                    if (!data.records || data.records.length === 0) {
+                        setError(`No sections found for ${teacher.name}. Check if this teacher is linked to any sections in Airtable.`);
+                        setSections([]);
+                        setLoading(false);
+                        return;
+                    }
+                    
                     const sectionsList = data.records.map(record => ({
                         id: record.id,
-                        name: record.fields[CONFIG.FIELDS.SECTIONS.NAME],
+                        name: record.fields[CONFIG.FIELDS.SECTIONS.NAME] || 'Unnamed Section',
                         studentCount: record.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER]?.length || 0
                     }));
+                    
+                    console.log('Sections list:', sectionsList);
                     setSections(sectionsList);
                 } catch (err) {
                     console.error('Error loading sections:', err);
-                    setError('Failed to load sections.');
+                    setError(`Failed to load sections: ${err.message}`);
                 } finally {
                     setLoading(false);
                 }
