@@ -17,11 +17,9 @@
         const { useState, useEffect } = React;
         
         const CONFIG = {
-            AIRTABLE_API_KEY: 'patCUB0HwqgJr9nOr.d93cc816ba0e0dc0c22bbe5eaada139d84f864256b401446d1c2726da1247b4f',
-            AIRTABLE_BASE_ID: 'appTwYDVvnYPB8D2N',
-            
-            // Your n8n Webhook URL
-            N8N_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook-test/voice-grader',
+            AIRTABLE_API_KEY: 'YOUR_AIRTABLE_API_KEY_HERE',
+            AIRTABLE_BASE_ID: 'YOUR_BASE_ID_HERE',
+            N8N_WEBHOOK_URL: 'YOUR_N8N_WEBHOOK_URL_HERE',
             TABLES: {
                 TEACHERS: 'Teachers',
                 SECTIONS: 'Master Sections',
@@ -130,24 +128,28 @@
                 setStep('class-select');
                 setError(null);
                 try {
-                    // Teacher Link is an array of record IDs, so we need to check if teacher.id is in that array
-                    const filterFormula = `FIND("${teacher.id}", ARRAYJOIN({Teacher Link}))`;
-                    console.log('Filter formula:', filterFormula);
+                    // Get the full teacher record to access Master Sections field
+                    const teacherData = await airtableRequest(`${CONFIG.TABLES.TEACHERS}/${teacher.id}`);
+                    console.log('Teacher data:', teacherData);
                     
-                    const data = await airtableRequest(`${CONFIG.TABLES.SECTIONS}?filterByFormula=${encodeURIComponent(filterFormula)}`);
-                    console.log('Sections data:', data);
+                    const sectionIds = teacherData.fields[CONFIG.FIELDS.TEACHERS.SECTIONS] || [];
+                    console.log('Section IDs:', sectionIds);
                     
-                    if (!data.records || data.records.length === 0) {
-                        setError(`No sections found for ${teacher.name}. Check if this teacher is linked to any sections in Airtable.`);
+                    if (sectionIds.length === 0) {
+                        setError(`No sections found for ${teacher.name}. Check if this teacher has sections linked in Airtable.`);
                         setSections([]);
                         setLoading(false);
                         return;
                     }
                     
-                    const sectionsList = data.records.map(record => ({
-                        id: record.id,
-                        name: record.fields[CONFIG.FIELDS.SECTIONS.NAME] || 'Unnamed Section',
-                        studentCount: record.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER]?.length || 0
+                    // Fetch all sections for this teacher
+                    const sectionsPromises = sectionIds.map(id => airtableRequest(`${CONFIG.TABLES.SECTIONS}/${id}`));
+                    const sectionsData = await Promise.all(sectionsPromises);
+                    
+                    const sectionsList = sectionsData.map(data => ({
+                        id: data.id,
+                        name: data.fields[CONFIG.FIELDS.SECTIONS.NAME] || 'Unnamed Section',
+                        studentCount: data.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER]?.length || 0
                     }));
                     
                     console.log('Sections list:', sectionsList);
