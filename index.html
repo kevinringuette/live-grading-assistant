@@ -169,43 +169,59 @@ function GradingInterface() {
     }
   };
 
-  const loadSectionsForTeacher = async (teacherId) => {
+  const selectTeacher = async (teacher) => {
+    setSelectedTeacher(teacher);
     setLoading(true);
+    setStep('section-select');
     setError(null);
     try {
-      const formula = `SEARCH('${teacherId}', ARRAYJOIN({${CONFIG.FIELDS.SECTIONS.TEACHER_LINK}}))`;
-      const data = await airtableRequest(`${CONFIG.TABLES.SECTIONS}?filterByFormula=${encodeURIComponent(formula)}`);
-      const sectionsList = (data.records || []).map(record => ({
-        id: record.id,
-        name: record.fields[CONFIG.FIELDS.SECTIONS.NAME],
-        sectionId: record.fields[CONFIG.FIELDS.SECTIONS.SECTION_ID]
-      })).sort((a,b) => a.name.localeCompare(b.name));
+      const teacherData = await airtableRequest(`${CONFIG.TABLES.TEACHERS}/${teacher.id}`);
+      const sectionIds = teacherData.fields[CONFIG.FIELDS.TEACHERS.SECTIONS] || [];
+      if (sectionIds.length === 0) {
+        setError(`No sections found for ${teacher.name}. Check if this teacher has sections linked in Airtable.`);
+        setSections([]);
+        setLoading(false);
+        return;
+      }
+      const sectionsPromises = sectionIds.map(id => airtableRequest(`${CONFIG.TABLES.SECTIONS}/${id}`));
+      const sectionsData = await Promise.all(sectionsPromises);
+      const sectionsList = sectionsData.map(data => ({
+        id: data.id,
+        name: data.fields[CONFIG.FIELDS.SECTIONS.NAME] || 'Unnamed Section',
+        sectionId: data.fields[CONFIG.FIELDS.SECTIONS.SECTION_ID],
+        studentCount: data.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER]?.length || 0
+      }))
+      .sort((a,b) => a.name.localeCompare(b.name));
       setSections(sectionsList);
     } catch (err) {
       console.error('Error loading sections:', err);
-      setError('Failed to load sections.');
+      setError(`Failed to load sections: ${err.message}`);
     } finally {
       setLoading(false);
     }
   };
 
-  const loadStudentsForSection = async (sectionId) => {
+  const selectSection = async (section) => {
+    setSelectedSection(section);
     setLoading(true);
+    setStep('assignment-setup');
     setError(null);
     try {
-      const formula = `SEARCH('${sectionId}', ARRAYJOIN({${CONFIG.FIELDS.STUDENTS.SECTIONS}}))`;
-      const data = await airtableRequest(`${CONFIG.TABLES.STUDENTS}?filterByFormula=${encodeURIComponent(formula)}`);
-      const studentsList = (data.records || []).map(record => ({
-        id: record.id,
-        name: record.fields[CONFIG.FIELDS.STUDENTS.NAME],
-        email: record.fields[CONFIG.FIELDS.STUDENTS.EMAIL],
-        studentId: record.fields[CONFIG.FIELDS.STUDENTS.ID]
-      })).sort((a,b) => a.name.localeCompare(b.name));
+      const sectionData = await airtableRequest(`${CONFIG.TABLES.SECTIONS}/${section.id}`);
+      const studentIds = sectionData.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER] || [];
+      const studentsPromises = studentIds.map(id => airtableRequest(`${CONFIG.TABLES.STUDENTS}/${id}`));
+      const studentsData = await Promise.all(studentsPromises);
+      const studentsList = studentsData.map(data => ({
+        id: data.id,
+        name: data.fields[CONFIG.FIELDS.STUDENTS.NAME],
+        email: data.fields[CONFIG.FIELDS.STUDENTS.EMAIL],
+        studentId: data.fields[CONFIG.FIELDS.STUDENTS.ID]?.toString() || 'N/A'
+      }));
       setStudents(studentsList);
       setStudentOrder(studentsList.map(s => s.id));
       const initialGrades = {};
-      studentsList.forEach(s => {
-        initialGrades[s.id] = { scores: {}, comments: '', completed: false };
+      studentsList.forEach(student => {
+        initialGrades[student.id] = { scores: {}, comments: '', completed: false };
       });
       setGrades(initialGrades);
     } catch (err) {
@@ -214,18 +230,6 @@ function GradingInterface() {
     } finally {
       setLoading(false);
     }
-  };
-
-  const selectTeacher = (teacher) => {
-    setSelectedTeacher(teacher);
-    loadSectionsForTeacher(teacher.id);
-    setStep('section-select');
-  };
-
-  const selectSection = (section) => {
-    setSelectedSection(section);
-    loadStudentsForSection(section.id);
-    setStep('assignment-setup');
   };
 
   const startGradingSession = async () => {
@@ -586,7 +590,7 @@ function GradingInterface() {
                       className="w-full text-left p-4 border border-gray-200 rounded-lg hover:bg-blue-50 hover:border-blue-300 transition-colors"
                     >
                       <p className="font-semibold text-gray-900">{section.name}</p>
-                      <p className="text-sm text-gray-500">ID: {section.sectionId}</p>
+                      <p className="text-sm text-gray-500">{section.studentCount} students</p>
                     </button>
                   ))}
                 </div>
