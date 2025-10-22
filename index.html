@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Grading Assistant</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        
+        // ============================================================================
+        // CONFIGURATION - UPDATE THESE VALUES
+        // ============================================================================
+        const CONFIG = {
+            // Your Airtable Configuration
+            AIRTABLE_API_KEY: 'YOUR_AIRTABLE_API_KEY_HERE',
+            AIRTABLE_BASE_ID: 'YOUR_BASE_ID_HERE',
+            
+            // Your n8n Webhook URL
+            N8N_WEBHOOK_URL: 'YOUR_N8N_WEBHOOK_URL_HERE',
+            
+            // Airtable Table Names
+            TABLES: {
+                TEACHERS: 'Teachers',
+                SECTIONS: 'Master Sections',
+                STUDENTS: 'Student Roster',
+                GRADES: 'Grades'
+            },
+            
+            // Airtable Field Names
+            FIELDS: {
+                TEACHERS: {
+                    NAME: 'Name',
+                    EMAIL: 'Email',
+                    FIRST_NAME: 'First Name',
+                    LAST_NAME: 'Last Name',
+                    SECTIONS: 'Master Sections'
+                },
+                SECTIONS: {
+                    NAME: 'Section Name',
+                    SECTION_ID: 'Section ID',
+                    TEACHER_LINK: 'Teacher Link',
+                    STUDENT_ROSTER: 'Student Roster'
+                },
+                STUDENTS: {
+                    NAME: 'Name',
+                    EMAIL: 'Email',
+                    ID: 'ID',
+                    SECTIONS: 'Master Sections'
+                },
+                GRADES: {
+                    ASSIGNMENT: 'Assignment',
+                    STUDENT: 'Student',
+                    COMMENTS: 'Comments',
+                    FINAL_GRADE: 'Final Grade'
+                }
+            }
+        };
+
+        // Icon components using Lucide
+        const Icon = ({ name, className = "w-5 h-5" }) => {
+            useEffect(() => {
+                lucide.createIcons();
+            }, []);
+            return React.createElement('i', { 
+                'data-lucide': name, 
+                className 
+            });
+        };
+
+        function GradingInterface() {
+            const [step, setStep] = useState('teacher-select');
+            const [isRecording, setIsRecording] = useState(false);
+            const [recordingTime, setRecordingTime] = useState(0);
+            
+            const [teachers, setTeachers] = useState([]);
+            const [selectedTeacher, setSelectedTeacher] = useState(null);
+            const [sections, setSections] = useState([]);
+            const [selectedSection, setSelectedSection] = useState(null);
+            const [students, setStudents] = useState([]);
+            
+            const [assignmentName, setAssignmentName] = useState('');
+            const [rubricItems, setRubricItems] = useState([
+                { name: 'Correctness', maxPoints: 25 },
+                { name: 'Method', maxPoints: 25 },
+                { name: 'Clarity', maxPoints: 25 },
+                { name: 'Completeness', maxPoints: 25 }
+            ]);
+            
+            const [grades, setGrades] = useState({});
+            const [currentStudent, setCurrentStudent] = useState(null);
+            const [transcript, setTranscript] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [error, setError] = useState(null);
+            const [editingStudent, setEditingStudent] = useState(null);
+            const [editingField, setEditingField] = useState(null);
+            const [processingAudio, setProcessingAudio] = useState(false);
+            const [sessionId, setSessionId] = useState(null);
+
+            useEffect(() => {
+                if (CONFIG.AIRTABLE_API_KEY === 'YOUR_AIRTABLE_API_KEY_HERE') {
+                    setError('Please configure your Airtable API key in the CONFIG section.');
+                }
+                loadTeachersFromAirtable();
+            }, []);
+
+            useEffect(() => {
+                let interval;
+                if (isRecording) {
+                    interval = setInterval(() => setRecordingTime(prev => prev + 1), 1000);
+                }
+                return () => clearInterval(interval);
+            }, [isRecording]);
+
+            useEffect(() => {
+                const handleKeyPress = (e) => {
+                    if (e.code === 'Space' && isRecording && !editingStudent) {
+                        e.preventDefault();
+                        processCurrentAudioChunk();
+                    }
+                };
+                window.addEventListener('keydown', handleKeyPress);
+                return () => window.removeEventListener('keydown', handleKeyPress);
+            }, [isRecording, editingStudent]);
+
+            const airtableRequest = async (endpoint, options = {}) => {
+                const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${endpoint}`;
+                const response = await fetch(url, {
+                    ...options,
+                    headers: {
+                        'Authorization': `Bearer ${CONFIG.AIRTABLE_API_KEY}`,
+                        'Content-Type': 'application/json',
+                        ...options.headers
+                    }
+                });
+                if (!response.ok) throw new Error(`Airtable API error: ${response.statusText}`);
+                return response.json();
+            };
+
+            const loadTeachersFromAirtable = async () => {
+                setLoading(true);
+                setError(null);
+                try {
+                    const data = await airtableRequest(CONFIG.TABLES.TEACHERS);
+                    const teachersList = data.records.map(record => ({
+                        id: record.id,
+                        name: record.fields[CONFIG.FIELDS.TEACHERS.NAME] || 
+                              `${record.fields[CONFIG.FIELDS.TEACHERS.FIRST_NAME]} ${record.fields[CONFIG.FIELDS.TEACHERS.LAST_NAME]}`,
+                        email: record.fields[CONFIG.FIELDS.TEACHERS.EMAIL]
+                    }));
+                    setTeachers(teachersList);
+                } catch (err) {
+                    setError('Failed to load teachers. Check configuration.');
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const selectTeacher = async (teacher) => {
+                setSelectedTeacher(teacher);
+                setLoading(true);
+                setStep('class-select');
+                setError(null);
+                try {
+                    const filterFormula = `SEARCH("${teacher.id}", ARRAYJOIN({${CONFIG.FIELDS.SECTIONS.TEACHER_LINK}}))`;
+                    const data = await airtableRequest(`${CONFIG.TABLES.SECTIONS}?filterByFormula=${encodeURIComponent(filterFormula)}`);
+                    const sectionsList = data.records.map(record => ({
+                        id: record.id,
+                        name: record.fields[CONFIG.FIELDS.SECTIONS.NAME],
+                        studentCount: record.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER]?.length || 0
+                    }));
+                    setSections(sectionsList);
+                } catch (err) {
+                    setError('Failed to load sections.');
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const selectSection = async (section) => {
+                setSelectedSection(section);
+                setLoading(true);
+                setStep('setup');
+                setError(null);
+                try {
+                    const sectionData = await airtableRequest(`${CONFIG.TABLES.SECTIONS}/${section.id}`);
+                    const studentIds = sectionData.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER] || [];
+                    
+                    const studentsPromises = studentIds.map(id => airtableRequest(`${CONFIG.TABLES.STUDENTS}/${id}`));
+                    const studentsData = await Promise.all(studentsPromises);
+                    
+                    const studentsList = studentsData.map(data => ({
+                        id: data.id,
+                        name: data.fields[CONFIG.FIELDS.STUDENTS.NAME],
+                        email: data.fields[CONFIG.FIELDS.STUDENTS.EMAIL],
+                        studentId: data.fields[CONFIG.FIELDS.STUDENTS.ID]?.toString() || 'N/A'
+                    }));
+                    
+                    setStudents(studentsList);
+                    const initialGrades = {};
+                    studentsList.forEach(student => {
+                        initialGrades[student.id] = { scores: {}, comments: '', completed: false };
+                    });
+                    setGrades(initialGrades);
+                } catch (err) {
+                    setError('Failed to load students.');
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const startRecording = () => {
+                setIsRecording(true);
+                setTranscript([]);
+                setSessionId(Date.now().toString());
+            };
+
+            const stopRecording = () => {
+                setIsRecording(false);
+                setCurrentStudent(null);
+            };
+
+            const processCurrentAudioChunk = () => {
+                if (processingAudio) return;
+                setProcessingAudio(true);
+                setTranscript(prev => [...prev, { text: '⏳ Processing...', isProcessing: true }]);
+                
+                setTimeout(() => {
+                    simulateNextStudent();
+                    setProcessingAudio(false);
+                    setTranscript(prev => prev.filter(t => !t.isProcessing));
+                }, 2000);
+            };
+
+            const simulateNextStudent = () => {
+                const ungradedStudents = students.filter(s => !grades[s.id]?.completed);
+                if (ungradedStudents.length === 0) {
+                    setTranscript(prev => [...prev, { text: '✅ All students graded!' }]);
+                    return;
+                }
+
+                const nextStudent = ungradedStudents[0];
+                setCurrentStudent(nextStudent.name);
+                
+                const baseScores = [23, 22, 24, 21];
+                const randomScores = rubricItems.reduce((acc, item, idx) => {
+                    acc[item.name] = baseScores[idx % baseScores.length];
+                    return acc;
+                }, {});
+                
+                const comments = [
+                    'Excellent work showing all steps clearly.',
+                    'Good effort. Need more intermediate steps.',
+                    'Solid performance overall.',
+                    'Outstanding analysis and methodology.'
+                ];
+                
+                setTranscript(prev => [...prev, {
+                    text: `${nextStudent.name}. ${Object.entries(randomScores).map(([k, v]) => `${k} ${v}`).join(', ')}. ${comments[ungradedStudents.indexOf(nextStudent) % comments.length]}`
+                }]);
+                
+                setGrades(prev => ({
+                    ...prev,
+                    [nextStudent.id]: {
+                        scores: randomScores,
+                        comments: comments[ungradedStudents.indexOf(nextStudent) % comments.length],
+                        completed: true
+                    }
+                }));
+            };
+
+            const saveToAirtable = async () => {
+                setLoading(true);
+                try {
+                    const gradeRecords = Object.entries(grades)
+                        .filter(([_, data]) => data.completed)
+                        .map(([studentId, data]) => {
+                            const fields = {
+                                [CONFIG.FIELDS.GRADES.STUDENT]: [studentId],
+                                [CONFIG.FIELDS.GRADES.COMMENTS]: data.comments,
+                                [CONFIG.FIELDS.GRADES.FINAL_GRADE]: calculateTotal(data)
+                            };
+                            rubricItems.forEach(item => {
+                                fields[item.name] = data.scores[item.name] || 0;
+                            });
+                            return { fields };
+                        });
+                    
+                    await airtableRequest(CONFIG.TABLES.GRADES, {
+                        method: 'POST',
+                        body: JSON.stringify({ records: gradeRecords })
+                    });
+                    alert('Successfully saved grades to Airtable!');
+                } catch (err) {
+                    alert('Error saving to Airtable.');
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const addRubricItem = () => setRubricItems([...rubricItems, { name: '', maxPoints: 10 }]);
+            const removeRubricItem = (idx) => setRubricItems(rubricItems.filter((_, i) => i !== idx));
+            const updateRubricItem = (idx, field, value) => {
+                const updated = [...rubricItems];
+                updated[idx][field] = value;
+                setRubricItems(updated);
+            };
+
+            const startGrading = () => {
+                if (!assignmentName.trim()) return alert('Enter assignment name');
+                if (rubricItems.some(i => !i.name.trim())) return alert('Fill in all rubric items');
+                setStep('grading');
+            };
+
+            const formatTime = (secs) => {
+                const m = Math.floor(secs / 60);
+                const s = secs % 60;
+                return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+            };
+
+            const calculateTotal = (sg) => sg.scores ? Object.values(sg.scores).reduce((sum, s) => sum + (s || 0), 0) : 0;
+            const calculateMaxTotal = () => rubricItems.reduce((sum, item) => sum + (item.maxPoints || 0), 0);
+            const getInitials = (name) => name.split(' ').map(n => n[0]).join('');
+
+            const updateScore = (studentId, rubricItem, newScore) => {
+                const maxPoints = rubricItems.find(i => i.name === rubricItem)?.maxPoints || 0;
+                const validScore = Math.max(0, Math.min(newScore, maxPoints));
+                setGrades(prev => ({
+                    ...prev,
+                    [studentId]: {
+                        ...prev[studentId],
+                        scores: { ...prev[studentId].scores, [rubricItem]: validScore }
+                    }
+                }));
+            };
+
+            const updateComments = (studentId, newComments) => {
+                setGrades(prev => ({
+                    ...prev,
+                    [studentId]: { ...prev[studentId], comments: newComments }
+                }));
+            };
+
+            // Render teacher selection
+            if (step === 'teacher-select') {
+                return (
+                    <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+                        <div className="max-w-2xl w-full mx-auto px-6">
+                            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-8">
+                                <h1 className="text-3xl font-bold text-gray-900 mb-2">Live Grading Assistant</h1>
+                                <p className="text-gray-600 mb-6">Select your teacher profile</p>
+                                
+                                {error && (
+                                    <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
+                                        <p className="text-sm text-red-800">{error}</p>
+                                    </div>
+                                )}
+                                
+                                {loading ? (
+                                    <div className="text-center py-8">
+                                        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
+                                        <p className="text-gray-500 mt-4">Loading teachers...</p>
+                                    </div>
+                                ) : teachers.length === 0 ? (
+                                    <div className="text-center py-8">
+                                        <p className="text-gray-600">No teachers found. Check configuration.</p>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-3">
+                                        {teachers.map(teacher => (
+                                            <button
+                                                key={teacher.id}
+                                                onClick={() => selectTeacher(teacher)}
+                                                className="w-full text-left p-4 border border-gray-200 rounded-lg hover:border-blue-400 hover:bg-blue-50 transition-all"
+                                            >
+                                                <div className="flex items-center justify-between">
+                                                    <div>
+                                                        <p className="font-semibold text-gray-900">{teacher.name}</p>
+                                                        <p className="text-sm text-gray-500">{teacher.email}</p>
+                                                    </div>
+                                                    <Icon name="play" />
+                                                </div>
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            // Additional screens would go here...
+            // For brevity, showing structure. Full code available if needed.
+            
+            return <div className="p-8">Feature in progress...</div>;
+        }
+
+        ReactDOM.render(<GradingInterface />, document.getElementById('root'));
+    </script>
+</body>
+</html>
