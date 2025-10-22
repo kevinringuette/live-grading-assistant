@@ -26,7 +26,7 @@ const CONFIG = {
     SECTIONS: 'Master Sections',
     STUDENTS: 'Student Roster',
     GRADES: 'Grades',
-    GRADE_SCORES: 'Grade Scores',        // 👈 NEW
+    GRADE_SCORES: 'Grade Scores',
   },
   FIELDS: {
     TEACHERS: { NAME: 'Name', EMAIL: 'Email', FIRST_NAME: 'First Name', LAST_NAME: 'Last Name', SECTIONS: 'Master Sections' },
@@ -98,6 +98,11 @@ function GradingInterface() {
   const chunkIdRef = useRef(0);
   const isFlushingRef = useRef(false); // short lock for stop->restart only
 
+  // Upload state
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
+  const [uploadComplete, setUploadComplete] = useState(false);
+
   // MediaRecorder refs
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
@@ -164,73 +169,43 @@ function GradingInterface() {
     }
   };
 
-  const filteredTeachers = useMemo(() => {
-    const q = teacherQuery.trim().toLowerCase();
-    if (!q) return teachers;
-    return teachers.filter(t =>
-      (t.name || '').toLowerCase().includes(q) ||
-      (t.email || '').toLowerCase().includes(q)
-    );
-  }, [teachers, teacherQuery]);
-
-  const selectTeacher = async (teacher) => {
-    setSelectedTeacher(teacher);
+  const loadSectionsForTeacher = async (teacherId) => {
     setLoading(true);
-    setStep('class-select');
     setError(null);
     try {
-      const teacherData = await airtableRequest(`${CONFIG.TABLES.TEACHERS}/${teacher.id}`);
-      const sectionIds = teacherData.fields[CONFIG.FIELDS.TEACHERS.SECTIONS] || [];
-      if (sectionIds.length === 0) {
-        setError(`No sections found for ${teacher.name}. Check if this teacher has sections linked in Airtable.`);
-        setSections([]);
-        setLoading(false);
-        return;
-      }
-      const sectionsPromises = sectionIds.map(id => airtableRequest(`${CONFIG.TABLES.SECTIONS}/${id}`));
-      const sectionsData = await Promise.all(sectionsPromises);
-      const sectionsList = sectionsData.map(data => ({
-        id: data.id,
-        name: data.fields[CONFIG.FIELDS.SECTIONS.NAME] || 'Unnamed Section',
-        studentCount: data.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER]?.length || 0
-      }))
-      .sort((a,b) => a.name.localeCompare(b.name));
+      const formula = `SEARCH('${teacherId}', ARRAYJOIN({${CONFIG.FIELDS.SECTIONS.TEACHER_LINK}}))`;
+      const data = await airtableRequest(`${CONFIG.TABLES.SECTIONS}?filterByFormula=${encodeURIComponent(formula)}`);
+      const sectionsList = (data.records || []).map(record => ({
+        id: record.id,
+        name: record.fields[CONFIG.FIELDS.SECTIONS.NAME],
+        sectionId: record.fields[CONFIG.FIELDS.SECTIONS.SECTION_ID]
+      })).sort((a,b) => a.name.localeCompare(b.name));
       setSections(sectionsList);
     } catch (err) {
       console.error('Error loading sections:', err);
-      setError(`Failed to load sections: ${err.message}`);
+      setError('Failed to load sections.');
     } finally {
       setLoading(false);
     }
   };
 
-  const filteredSections = useMemo(() => {
-    const q = sectionQuery.trim().toLowerCase();
-    if (!q) return sections;
-    return sections.filter(s => (s.name || '').toLowerCase().includes(q));
-  }, [sections, sectionQuery]);
-
-  const selectSection = async (section) => {
-    setSelectedSection(section);
+  const loadStudentsForSection = async (sectionId) => {
     setLoading(true);
-    setStep('setup');
     setError(null);
     try {
-      const sectionData = await airtableRequest(`${CONFIG.TABLES.SECTIONS}/${section.id}`);
-      const studentIds = sectionData.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER] || [];
-      const studentsPromises = studentIds.map(id => airtableRequest(`${CONFIG.TABLES.STUDENTS}/${id}`));
-      const studentsData = await Promise.all(studentsPromises);
-      const studentsList = studentsData.map(data => ({
-        id: data.id,
-        name: data.fields[CONFIG.FIELDS.STUDENTS.NAME],
-        email: data.fields[CONFIG.FIELDS.STUDENTS.EMAIL],
-        studentId: data.fields[CONFIG.FIELDS.STUDENTS.ID]?.toString() || 'N/A'
-      }));
+      const formula = `SEARCH('${sectionId}', ARRAYJOIN({${CONFIG.FIELDS.STUDENTS.SECTIONS}}))`;
+      const data = await airtableRequest(`${CONFIG.TABLES.STUDENTS}?filterByFormula=${encodeURIComponent(formula)}`);
+      const studentsList = (data.records || []).map(record => ({
+        id: record.id,
+        name: record.fields[CONFIG.FIELDS.STUDENTS.NAME],
+        email: record.fields[CONFIG.FIELDS.STUDENTS.EMAIL],
+        studentId: record.fields[CONFIG.FIELDS.STUDENTS.ID]
+      })).sort((a,b) => a.name.localeCompare(b.name));
       setStudents(studentsList);
       setStudentOrder(studentsList.map(s => s.id));
       const initialGrades = {};
-      studentsList.forEach(student => {
-        initialGrades[student.id] = { scores: {}, comments: '', completed: false };
+      studentsList.forEach(s => {
+        initialGrades[s.id] = { scores: {}, comments: '', completed: false };
       });
       setGrades(initialGrades);
     } catch (err) {
@@ -241,444 +216,381 @@ function GradingInterface() {
     }
   };
 
-  // === RECORDING ===
-  const startRecording = async () => {
-    try {
-      setTranscript([]);
-      setSessionId(Date.now().toString());
-      setMicError(null);
-
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaStreamRef.current = stream;
-
-      const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-      chunksRef.current = [];
-
-      mr.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
-      };
-
-      mr.onstart = () => {
-        setIsRecording(true);
-        setRecordingTime(0);
-      };
-
-      mr.onstop = () => {
-        setIsRecording(false);
-      };
-
-      mediaRecorderRef.current = mr;
-      mr.start(); // continuous recording
-    } catch (err) {
-      console.error(err);
-      setMicError('Microphone permission denied or unsupported browser.');
-      setError('Could not access microphone. Please allow mic permissions.');
-    }
+  const selectTeacher = (teacher) => {
+    setSelectedTeacher(teacher);
+    loadSectionsForTeacher(teacher.id);
+    setStep('section-select');
   };
 
-  const stopRecording = () => {
-    try {
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-        mediaRecorderRef.current.stop();
-      }
-      if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach(t => t.stop());
-      }
-      setCurrentStudent(null);
-    } catch (e) {
-      console.warn('Error stopping recorder:', e);
-    }
+  const selectSection = (section) => {
+    setSelectedSection(section);
+    loadStudentsForSection(section.id);
+    setStep('assignment-setup');
   };
 
-  // fire-and-forget chunk processing
-  const processCurrentAudioChunk = async () => {
-    if (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive') {
-      setError('Recorder is not active. Click the mic to start.');
+  const startGradingSession = async () => {
+    if (!assignmentName.trim()) {
+      alert('Please enter an assignment name.');
       return;
     }
-    if (isFlushingRef.current) return; // brief protection during stop/restart
-
-    isFlushingRef.current = true;
-
-    // wait for stop -> capture blob
-    const mr = mediaRecorderRef.current;
-    const blobPromise = new Promise((resolve) => {
-      const handleStop = () => {
-        mr.removeEventListener('stop', handleStop);
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
-        resolve(blob);
-      };
-      mr.addEventListener('stop', handleStop);
-      mr.stop();
-    });
-
-    try {
-      const blob = await blobPromise;
-      // immediately restart for the next student
-      chunksRef.current = [];
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive') {
-        mediaRecorderRef.current.start();
-        setIsRecording(true);
-      }
-      isFlushingRef.current = false;
-
-      // enqueue background upload
-      const localChunkId = ++chunkIdRef.current;
-      setPendingCount((c) => c + 1);
-      setTranscript(prev => [...prev, { id: localChunkId, text: `⏳ Chunk ${localChunkId} pending…`, isProcessing: true }]);
-
-      uploadChunk(blob, localChunkId);
-    } catch (err) {
-      console.error('Chunk flush failed:', err);
-      isFlushingRef.current = false;
-      setTranscript(prev => [...prev, { id: ++chunkIdRef.current, text: '❌ Error capturing chunk.', isProcessing: false }]);
-    }
-  };
-
-  const uploadChunk = async (blob, localChunkId) => {
-    try {
-      const base64 = await blobToBase64(blob);
-      const filename = `chunk-${Date.now()}.webm`;
-
-      const roster = students.map(s => ({
-        id: s.id,
-        studentId: s.studentId,
-        name: s.name,
-        email: s.email
-      }));
-
-      const payload = {
-        audio: {
-          filename,
-          mimeType: 'audio/webm',
-          encoding: 'base64',
-          data: base64
-        },
-        session: {
-          id: sessionId || '',
-          assignment: assignmentName || '',
-          teacherName: selectedTeacher?.name || '',
-          teacherEmail: selectedTeacher?.email || '',
-          teacherId: selectedTeacher?.id || '',
-          sectionName: selectedSection?.name || '',
-          sectionId: selectedSection?.id || ''
-        },
-        rubric: rubricItems,
-        roster
-      };
-
-      let result = null;
-      try {
-        const res = await fetch(CONFIG.N8N_WEBHOOK_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        if (!res.ok) throw new Error(`n8n error ${res.status}`);
-        result = await res.json(); // { studentName, studentId?, scores, comments, transcript }
-      } catch (err) {
-        console.error('JSON upload failed:', err);
-      }
-
-      if (result && (result.studentName || result.studentId) && result.scores) {
-        let student = null;
-        if (result.studentId) {
-          student = students.find(s => s.studentId?.toString() === String(result.studentId)) ||
-                    students.find(s => s.id === result.studentId);
-        }
-        if (!student && result.studentName) {
-          const target = String(result.studentName).trim().toLowerCase();
-          student = students.find(s => (s.name || '').trim().toLowerCase() === target);
-        }
-
-        if (student) {
-          const line = `${student.name}. ${Object.entries(result.scores).map(([k, v]) => `${k} ${v}`).join(', ')}${result.comments ? `. ${result.comments}` : ''}`;
-          replaceTranscript(localChunkId, line, false);
-          applyGrade(student.id, result.scores || {}, result.comments || '');
-        } else {
-          replaceTranscript(localChunkId, result.transcript || `Processed chunk ${localChunkId} (no matching student found).`, false);
-        }
-      } else {
-        // fallback simulate
-        replaceTranscript(localChunkId, `Chunk ${localChunkId} processed (simulated).`, false);
-        simulateNextStudent();
-      }
-    } catch (err) {
-      console.error('Processing failed:', err);
-      replaceTranscript(localChunkId, `❌ Error processing chunk ${localChunkId}. Check webhook and CORS.`, false);
-    } finally {
-      setPendingCount((c) => Math.max(0, c - 1));
-    }
-  };
-
-  const replaceTranscript = (id, text, isProcessing) => {
-    setTranscript(prev =>
-      prev.map(entry => entry.id === id ? { ...entry, text, isProcessing } : entry)
-    );
-  };
-
-  // move a student one position down in the visible order when graded
-  const bumpStudentDown = (studentId) => {
-    setStudentOrder(prev => {
-      const idx = prev.indexOf(studentId);
-      if (idx === -1 || idx === prev.length - 1) return prev; // already last or not found
-      const next = [...prev];
-      [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
-      return next;
-    });
-  };
-
-  const applyGrade = (studentId, scores, comments) => {
-    setGrades(prev => {
-      const updated = {
-        ...prev,
-        [studentId]: { scores: scores || {}, comments: comments || '', completed: true }
-      };
-    return updated;
-    });
-    const student = students.find(s => s.id === studentId);
-    if (student) {
-      setCurrentStudent(student.name);
-      bumpStudentDown(studentId);
-    }
-  };
-
-  const simulateNextStudent = () => {
-    const ungradedIds = studentOrder.filter(id => !grades[id]?.completed);
-    if (ungradedIds.length === 0) {
-      setTranscript(prev => [...prev, { id: ++chunkIdRef.current, text: '✅ All students graded!', isProcessing: false }]);
-      return;
-    }
-    const nextId = ungradedIds[0];
-    const nextStudent = students.find(s => s.id === nextId);
-    if (!nextStudent) return;
-
-    setCurrentStudent(nextStudent.name);
-    const baseScores = [23, 22, 24, 21];
-    const randomScores = rubricItems.reduce((acc, item, idx) => {
-      acc[item.name] = baseScores[idx % baseScores.length];
-      return acc;
-    }, {});
-    const comments = [
-      'Excellent work showing all steps clearly.',
-      'Good effort. Need more intermediate steps.',
-      'Solid performance overall.',
-      'Outstanding analysis and methodology.'
-    ];
-    const comment = comments[ungradedIds.indexOf(nextId) % comments.length];
-
-    setTranscript(prev => [...prev, { id: ++chunkIdRef.current, text: `${nextStudent.name}. ${Object.entries(randomScores).map(([k, v]) => `${k} ${v}`).join(', ')}. ${comment}`, isProcessing: false }]);
-    applyGrade(nextId, randomScores, comment);
-  };
-
-  const saveToAirtable = async () => {
-    setLoading(true);
-    try {
-      // 1) pick only completed students
-      const completed = Object.entries(grades).filter(([_, g]) => g.completed);
-      if (completed.length === 0) {
-        alert('No completed grades to save yet.');
-        setLoading(false);
-        return;
-      }
-  
-      // 2) build Grade records
-      const gradeRecords = completed.map(([studentRecordId, g]) => {
-        const fields = {
-          [CONFIG.FIELDS.GRADES.STUDENT]: [studentRecordId],          // link → Student Roster (record id)
-          [CONFIG.FIELDS.GRADES.COMMENTS]: g.comments,
-          [CONFIG.FIELDS.GRADES.FINAL_GRADE]: calculateTotal(g),
-  
-          // If these exist in your Grades table (plain text or linked), keep them:
-          [CONFIG.FIELDS.GRADES.ASSIGNMENT]: assignmentName || '',
-          'Teacher Name': selectedTeacher?.name || '',
-          'Section Name': selectedSection?.name || ''
-          // If Teacher/Section/Assignment are linked fields instead of text,
-          // pass their RECORD IDs here rather than names.
-        };
-        return { _studentRecordId: studentRecordId, fields };
-      });
-  
-      // 3) POST Grades in batches of 10; collect returned Grade IDs
-      const gradeIdByStudent = {};
-      for (const batch of chunk(gradeRecords, 10)) {
-        const res = await airtableRequest(CONFIG.TABLES.GRADES, {
-          method: 'POST',
-          body: JSON.stringify({ records: batch.map(b => ({ fields: b.fields })) })
-        });
-        res.records.forEach((rec, i) => {
-          const studentRecordId = batch[i]._studentRecordId;
-          gradeIdByStudent[studentRecordId] = rec.id;
-        });
-      }
-  
-      // 4) Build Grade Scores rows (one per rubric item)
-      const scoreRows = [];
-      for (const [studentRecordId, g] of completed) {
-        const gradeId = gradeIdByStudent[studentRecordId];
-        if (!gradeId) continue;
-  
-        rubricItems.forEach(item => {
-          const score = g.scores[item.name] ?? 0;
-          scoreRows.push({
-            fields: {
-              [CONFIG.FIELDS.GRADE_SCORES.GRADE]: [gradeId],     // link → Grades
-              [CONFIG.FIELDS.GRADE_SCORES.LABEL]: item.name,     // “Correctness”, “Method”, etc.
-              [CONFIG.FIELDS.GRADE_SCORES.SCORE]: score,         // number
-              [CONFIG.FIELDS.GRADE_SCORES.MAX]: item.maxPoints ?? null
-            }
-          });
-        });
-      }
-  
-      // 5) POST Grade Scores in batches of 10
-      for (const batch of chunk(scoreRows, 10)) {
-        await airtableRequest(CONFIG.TABLES.GRADE_SCORES, {
-          method: 'POST',
-          body: JSON.stringify({ records: batch })
-        });
-      }
-  
-      alert('Successfully saved grades and rubric scores!');
-    } catch (err) {
-      console.error('Error saving:', err);
-      alert('Error saving to Airtable.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const addRubricItem = () => setRubricItems([...rubricItems, { name: '', maxPoints: 10 }]);
-  const removeRubricItem = (idx) => setRubricItems(rubricItems.filter((_, i) => i !== idx));
-  const updateRubricItem = (idx, field, value) => {
-    const updated = [...rubricItems];
-    updated[idx][field] = field === 'maxPoints' ? (parseInt(value) || 0) : value;
-    setRubricItems(updated);
-  };
-  const startGrading = () => {
-    if (!assignmentName.trim()) return alert('Enter assignment name');
-    if (rubricItems.some(i => !i.name.trim())) return alert('Fill in all rubric items');
+    setSessionId(Date.now().toString());
     setStep('grading');
   };
-  const formatTime = (secs) => {
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
-    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+
+  const toggleRecording = async () => {
+    if (isRecording) {
+      await stopRecording();
+    } else {
+      await startRecording();
+    }
   };
-  const calculateTotal = (sg) => sg.scores ? Object.values(sg.scores).reduce((sum, s) => sum + (s || 0), 0) : 0;
-  const calculateMaxTotal = () => rubricItems.reduce((sum, item) => sum + (item.maxPoints || 0), 0);
-  const getInitials = (name) => (name || '').split(' ').map(n => n[0]).join('');
-  const updateScore = (studentId, rubricItem, newScore) => {
-    const maxPoints = rubricItems.find(i => i.name === rubricItem)?.maxPoints || 0;
-    const validScore = Math.max(0, Math.min(newScore, maxPoints));
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      mediaRecorderRef.current = recorder;
+      chunksRef.current = [];
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      recorder.start();
+      setIsRecording(true);
+      setRecordingTime(0);
+      setMicError(null);
+    } catch (err) {
+      console.error('Microphone error:', err);
+      setMicError('Microphone access denied');
+    }
+  };
+
+  const stopRecording = async () => {
+    if (!mediaRecorderRef.current) return;
+    return new Promise((resolve) => {
+      const rec = mediaRecorderRef.current;
+      rec.onstop = async () => {
+        if (mediaStreamRef.current) {
+          mediaStreamRef.current.getTracks().forEach(track => track.stop());
+          mediaStreamRef.current = null;
+        }
+        if (chunksRef.current.length > 0) await processCurrentAudioChunk();
+        setIsRecording(false);
+        mediaRecorderRef.current = null;
+        resolve();
+      };
+      rec.stop();
+    });
+  };
+
+  const processCurrentAudioChunk = async () => {
+    if (isFlushingRef.current || chunksRef.current.length === 0) return;
+    isFlushingRef.current = true;
+    const wasRecording = isRecording;
+    const currentChunks = [...chunksRef.current];
+    chunksRef.current = [];
+    const chunkNum = ++chunkIdRef.current;
+    const blob = new Blob(currentChunks, { type: 'audio/webm' });
+    const entryId = Date.now();
+    setTranscript(prev => [...prev, { id: entryId, text: `[Processing chunk #${chunkNum}...]`, isProcessing: true }]);
+    setPendingCount(prev => prev + 1);
+
+    try {
+      const base64 = await blobToBase64(blob);
+      const payload = {
+        sessionId,
+        chunkNumber: chunkNum,
+        audioBase64: base64,
+        rubricItems,
+        students: students.map(s => ({ id: s.id, name: s.name })),
+        currentGrades: grades,
+        teacherName: selectedTeacher?.name,
+        sectionName: selectedSection?.name,
+        assignmentName
+      };
+      const response = await fetch(CONFIG.N8N_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error(`n8n error: ${response.status}`);
+      const result = await response.json();
+      setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: result.transcript || '[No transcript]', isProcessing: false } : e));
+      if (result.updates) {
+        setGrades(prev => {
+          const next = { ...prev };
+          result.updates.forEach(upd => {
+            const sid = upd.studentId;
+            if (next[sid]) {
+              next[sid] = { ...next[sid], ...upd.data };
+            }
+          });
+          return next;
+        });
+      }
+      if (result.currentStudent) setCurrentStudent(result.currentStudent);
+    } catch (err) {
+      console.error('Processing error:', err);
+      setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: `[Error: ${err.message}]`, isProcessing: false } : e));
+    } finally {
+      setPendingCount(prev => Math.max(0, prev - 1));
+      isFlushingRef.current = false;
+      if (wasRecording && !isRecording && mediaRecorderRef.current?.state === 'inactive') {
+        await startRecording();
+      }
+    }
+  };
+
+  const updateScore = (studentId, rubricName, value) => {
     setGrades(prev => ({
       ...prev,
-      [studentId]: { ...prev[studentId], scores: { ...prev[studentId].scores, [rubricItem]: validScore } }
-    }));
-  };
-  const updateComments = (studentId, newComments) => {
-    setGrades(prev => ({
-      ...prev,
-      [studentId]: { ...prev[studentId], comments: newComments }
+      [studentId]: {
+        ...prev[studentId],
+        scores: { ...prev[studentId].scores, [rubricName]: value }
+      }
     }));
   };
 
-  // ==== RENDERING ====
+  const updateComments = (studentId, value) => {
+    setGrades(prev => ({
+      ...prev,
+      [studentId]: { ...prev[studentId], comments: value }
+    }));
+  };
+
+  const calculateTotal = (studentGrade) => {
+    return Object.values(studentGrade.scores).reduce((sum, score) => sum + (score || 0), 0);
+  };
+
+  const calculateMaxTotal = () => {
+    return rubricItems.reduce((sum, item) => sum + item.maxPoints, 0);
+  };
+
+  const getInitials = (name) => {
+    return name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+  };
+
+  const formatTime = (seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const addRubricItem = () => {
+    setRubricItems([...rubricItems, { name: `Criterion ${rubricItems.length + 1}`, maxPoints: 10 }]);
+  };
+
+  const updateRubricItem = (index, field, value) => {
+    const updated = [...rubricItems];
+    updated[index][field] = field === 'maxPoints' ? parseInt(value) || 0 : value;
+    setRubricItems(updated);
+  };
+
+  const removeRubricItem = (index) => {
+    if (rubricItems.length > 1) setRubricItems(rubricItems.filter((_, i) => i !== index));
+  };
+
+  const moveStudent = (studentId, direction) => {
+    const idx = studentOrder.indexOf(studentId);
+    if ((direction === 'up' && idx > 0) || (direction === 'down' && idx < studentOrder.length - 1)) {
+      const newOrder = [...studentOrder];
+      const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+      [newOrder[idx], newOrder[swapIdx]] = [newOrder[swapIdx], newOrder[idx]];
+      setStudentOrder(newOrder);
+    }
+  };
+
+  const orderedStudents = useMemo(() => {
+    return studentOrder.map(id => students.find(s => s.id === id)).filter(Boolean);
+  }, [studentOrder, students]);
+
+  const filteredTeachers = useMemo(() => {
+    const q = teacherQuery.toLowerCase();
+    return teachers.filter(t => t.name.toLowerCase().includes(q) || (t.email || '').toLowerCase().includes(q));
+  }, [teachers, teacherQuery]);
+
+  const filteredSections = useMemo(() => {
+    const q = sectionQuery.toLowerCase();
+    return sections.filter(s => s.name.toLowerCase().includes(q) || (s.sectionId || '').toLowerCase().includes(q));
+  }, [sections, sectionQuery]);
+
+  // NEW: Upload grades to Airtable
+  const uploadGradesToAirtable = async () => {
+    if (isUploading) return;
+    
+    // Check if there are any completed grades
+    const completedGrades = Object.entries(grades).filter(([_, g]) => g.completed);
+    if (completedGrades.length === 0) {
+      alert('No completed grades to upload. Please complete at least one student grade.');
+      return;
+    }
+
+    if (!confirm(`Upload ${completedGrades.length} completed grade(s) to Airtable?`)) {
+      return;
+    }
+
+    setIsUploading(true);
+    setUploadProgress({ current: 0, total: completedGrades.length });
+    setError(null);
+
+    try {
+      // Step 1: Create Grade records (in batches of 10)
+      const gradeRecordsToCreate = completedGrades.map(([studentId, gradeData]) => {
+        const student = students.find(s => s.id === studentId);
+        const total = calculateTotal(gradeData);
+        
+        return {
+          fields: {
+            [CONFIG.FIELDS.GRADES.ASSIGNMENT]: assignmentName,
+            [CONFIG.FIELDS.GRADES.STUDENT]: [studentId], // Link to student record
+            [CONFIG.FIELDS.GRADES.COMMENTS]: gradeData.comments || '',
+            [CONFIG.FIELDS.GRADES.FINAL_GRADE]: total
+          }
+        };
+      });
+
+      const gradeChunks = chunk(gradeRecordsToCreate, 10);
+      const createdGradeRecords = [];
+
+      for (let i = 0; i < gradeChunks.length; i++) {
+        const response = await airtableRequest(CONFIG.TABLES.GRADES, {
+          method: 'POST',
+          body: JSON.stringify({ records: gradeChunks[i] })
+        });
+        createdGradeRecords.push(...response.records);
+        setUploadProgress({ current: (i + 1) * 10, total: completedGrades.length });
+      }
+
+      // Step 2: Create Grade Score records for each rubric item
+      const scoreRecordsToCreate = [];
+      
+      createdGradeRecords.forEach((gradeRecord, idx) => {
+        const [studentId, gradeData] = completedGrades[idx];
+        
+        rubricItems.forEach(item => {
+          const score = gradeData.scores[item.name];
+          if (score !== undefined && score !== null && score !== '') {
+            scoreRecordsToCreate.push({
+              fields: {
+                [CONFIG.FIELDS.GRADE_SCORES.GRADE]: [gradeRecord.id], // Link to grade record
+                [CONFIG.FIELDS.GRADE_SCORES.LABEL]: item.name,
+                [CONFIG.FIELDS.GRADE_SCORES.SCORE]: score,
+                [CONFIG.FIELDS.GRADE_SCORES.MAX]: item.maxPoints
+              }
+            });
+          }
+        });
+      });
+
+      // Upload Grade Scores in batches
+      const scoreChunks = chunk(scoreRecordsToCreate, 10);
+      for (let i = 0; i < scoreChunks.length; i++) {
+        await airtableRequest(CONFIG.TABLES.GRADE_SCORES, {
+          method: 'POST',
+          body: JSON.stringify({ records: scoreChunks[i] })
+        });
+      }
+
+      setUploadComplete(true);
+      alert(`Successfully uploaded ${completedGrades.length} grade(s) with ${scoreRecordsToCreate.length} rubric scores to Airtable!`);
+      
+    } catch (err) {
+      console.error('Upload error:', err);
+      setError(`Failed to upload grades: ${err.message}`);
+      alert(`Upload failed: ${err.message}`);
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  if (loading && step === 'teacher-select') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading teachers...</p>
+        </div>
+      </div>
+    );
+  }
 
   if (step === 'teacher-select') {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="max-w-3xl w-full mx-auto px-6">
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-8">
-            <h1 className="text-3xl font-bold text-gray-900 mb-2">Live Grading Assistant</h1>
-            <p className="text-gray-600 mb-6">Select your teacher profile</p>
-            {error && <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg"><p className="text-sm text-red-800">{error}</p></div>}
-
-            <div className="mb-3 flex items-center gap-2">
-              <div className="relative flex-1">
-                <input
-                  type="text"
-                  value={teacherQuery}
-                  onChange={(e) => setTeacherQuery(e.target.value)}
-                  onKeyDown={(e)=>{ if(e.key==='Enter' && filteredTeachers[0]) selectTeacher(filteredTeachers[0]); }}
-                  placeholder="Type to find your name or email…"
-                  className="w-full px-4 py-3 pl-10 border border-gray-300 rounded-lg"
-                />
-                <div className="absolute left-3 top-3.5"><Icon name="search" className="w-4 h-4 text-gray-400"/></div>
-              </div>
-              <span className="text-xs text-gray-500 whitespace-nowrap">{filteredTeachers.length} shown</span>
-            </div>
-
-            {loading ? (
-              <div className="text-center py-8">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-                <p className="text-gray-500 mt-4">Loading…</p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-96 overflow-y-auto">
-                {filteredTeachers.map(teacher => (
-                  <button key={teacher.id} onClick={() => selectTeacher(teacher)} className="text-left p-3 border border-gray-200 rounded-lg hover:border-blue-400 hover:bg-blue-50">
-                    <div className="flex items-center justify-between">
-                      <div className="min-w-0">
-                        <p className="font-semibold text-gray-900 truncate">{teacher.name}</p>
-                        <p className="text-xs text-gray-500 truncate">{teacher.email}</p>
-                      </div>
-                      <Icon name="chevron-right" />
-                    </div>
-                  </button>
-                ))}
-                {filteredTeachers.length === 0 && (
-                  <div className="col-span-full text-sm text-gray-500 p-4 bg-gray-50 rounded-lg">
-                    No matches. Try typing a last name or email.
-                  </div>
-                )}
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-8">
+        <div className="max-w-2xl mx-auto">
+          <div className="bg-white rounded-lg shadow-lg p-8">
+            <h1 className="text-3xl font-bold text-gray-900 mb-2">Select Teacher</h1>
+            <p className="text-gray-600 mb-6">Choose a teacher to begin grading</p>
+            {error && (
+              <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+                <p className="text-sm text-red-600">{error}</p>
               </div>
             )}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (step === 'class-select') {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="max-w-3xl w-full mx-auto px-6">
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-8">
-            <button onClick={() => setStep('teacher-select')} className="text-blue-600 hover:text-blue-700 mb-4 text-sm">← Back</button>
-            <h1 className="text-3xl font-bold text-gray-900 mb-2">Select Your Class</h1>
-            <p className="text-gray-600 mb-4">Teacher: {selectedTeacher?.name}</p>
-
-            <div className="mb-4 relative">
+            <div className="mb-4">
               <input
                 type="text"
-                value={sectionQuery}
-                onChange={(e)=>setSectionQuery(e.target.value)}
-                placeholder="Filter sections…"
-                className="w-full px-4 py-3 pl-10 border border-gray-300 rounded-lg"
+                placeholder="Search teachers..."
+                value={teacherQuery}
+                onChange={(e) => setTeacherQuery(e.target.value)}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
-              <div className="absolute left-3 top-3.5"><Icon name="filter" className="w-4 h-4 text-gray-400"/></div>
             </div>
+            <div className="space-y-2 max-h-96 overflow-y-auto">
+              {filteredTeachers.map(teacher => (
+                <button
+                  key={teacher.id}
+                  onClick={() => selectTeacher(teacher)}
+                  className="w-full text-left p-4 border border-gray-200 rounded-lg hover:bg-blue-50 hover:border-blue-300 transition-colors"
+                >
+                  <p className="font-semibold text-gray-900">{teacher.name}</p>
+                  <p className="text-sm text-gray-500">{teacher.email}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
+  if (step === 'section-select') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-8">
+        <div className="max-w-2xl mx-auto">
+          <div className="bg-white rounded-lg shadow-lg p-8">
+            <button onClick={() => { setStep('teacher-select'); setSelectedTeacher(null); setSections([]); }} className="mb-4 text-blue-600 hover:text-blue-700 font-medium flex items-center gap-2">
+              <Icon name="arrow-left" className="w-4 h-4" />
+              Back to Teachers
+            </button>
+            <h1 className="text-3xl font-bold text-gray-900 mb-2">Select Section</h1>
+            <p className="text-gray-600 mb-6">Teacher: {selectedTeacher?.name}</p>
             {loading ? (
-              <div className="text-center py-8"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div></div>
-            ) : (
-              <div className="space-y-2 max-h-96 overflow-y-auto">
-                {filteredSections.map(section => (
-                  <button key={section.id} onClick={() => selectSection(section)} className="w-full text-left p-4 border border-gray-200 rounded-lg hover:border-blue-400 hover:bg-blue-50">
-                    <div className="flex items-center justify-between">
-                      <div className="min-w-0">
-                        <p className="font-semibold text-gray-900 truncate">{section.name}</p>
-                        <p className="text-xs text-gray-500">{section.studentCount} students</p>
-                      </div>
-                      <Icon name="chevron-right" />
-                    </div>
-                  </button>
-                ))}
-                {filteredSections.length === 0 && (
-                  <div className="text-sm text-gray-500 p-4 bg-gray-50 rounded-lg">No sections match your filter.</div>
-                )}
+              <div className="text-center py-8">
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+                <p className="text-gray-600">Loading sections...</p>
               </div>
+            ) : (
+              <>
+                <div className="mb-4">
+                  <input
+                    type="text"
+                    placeholder="Search sections..."
+                    value={sectionQuery}
+                    onChange={(e) => setSectionQuery(e.target.value)}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {filteredSections.map(section => (
+                    <button
+                      key={section.id}
+                      onClick={() => selectSection(section)}
+                      className="w-full text-left p-4 border border-gray-200 rounded-lg hover:bg-blue-50 hover:border-blue-300 transition-colors"
+                    >
+                      <p className="font-semibold text-gray-900">{section.name}</p>
+                      <p className="text-sm text-gray-500">ID: {section.sectionId}</p>
+                    </button>
+                  ))}
+                </div>
+              </>
             )}
           </div>
         </div>
@@ -686,94 +598,186 @@ function GradingInterface() {
     );
   }
 
-  if (step === 'setup') {
+  if (step === 'assignment-setup') {
     return (
-      <div className="min-h-screen bg-gray-50 py-12">
-        <div className="max-w-4xl mx-auto px-6">
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-8">
-            <button onClick={() => setStep('class-select')} className="text-blue-600 hover:text-blue-700 mb-4 text-sm">← Back</button>
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-8">
+        <div className="max-w-4xl mx-auto">
+          <div className="bg-white rounded-lg shadow-lg p-8">
+            <button onClick={() => { setStep('section-select'); setSelectedSection(null); setStudents([]); }} className="mb-4 text-blue-600 hover:text-blue-700 font-medium flex items-center gap-2">
+              <Icon name="arrow-left" className="w-4 h-4" />
+              Back to Sections
+            </button>
             <h1 className="text-3xl font-bold text-gray-900 mb-2">Assignment Setup</h1>
-            <p className="text-gray-600 mb-8">{selectedTeacher?.name} - {selectedSection?.name}</p>
-
-            <div className="mb-8">
-              <label className="block text-sm font-semibold text-gray-900 mb-2">Assignment Name</label>
-              <input type="text" value={assignmentName} onChange={(e) => setAssignmentName(e.target.value)} placeholder="e.g., Unit 3 Test" className="w-full px-4 py-3 border border-gray-300 rounded-lg" />
+            <p className="text-gray-600 mb-6">Section: {selectedSection?.name} ({students.length} students)</p>
+            
+            <div className="mb-6">
+              <label className="block text-sm font-medium text-gray-700 mb-2">Assignment Name</label>
+              <input
+                type="text"
+                value={assignmentName}
+                onChange={(e) => setAssignmentName(e.target.value)}
+                placeholder="e.g., Quiz 1, Homework 3"
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
             </div>
 
-            <div className="mb-8">
-              <div className="flex items-center justify-between mb-4">
-                <label className="text-sm font-semibold text-gray-900">Rubric Items</label>
-                <button onClick={addRubricItem} className="flex items-center gap-2 px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 rounded-lg">
-                  <Icon name="plus" className="w-4 h-4" /> Add Item
+            <div className="mb-6">
+              <div className="flex justify-between items-center mb-4">
+                <label className="block text-sm font-medium text-gray-700">Rubric Items</label>
+                <button onClick={addRubricItem} className="px-3 py-1 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 flex items-center gap-1">
+                  <Icon name="plus" className="w-4 h-4" />
+                  Add Item
                 </button>
               </div>
               <div className="space-y-3">
                 {rubricItems.map((item, idx) => (
-                  <div key={idx} className="flex gap-3">
-                    <input type="text" value={item.name} onChange={(e) => updateRubricItem(idx, 'name', e.target.value)} placeholder="Item name" className="flex-1 px-4 py-2 border border-gray-300 rounded-lg" />
-                    <input type="number" value={item.maxPoints} onChange={(e) => updateRubricItem(idx, 'maxPoints', e.target.value)} className="w-24 px-4 py-2 border border-gray-300 rounded-lg" />
-                    <button onClick={() => removeRubricItem(idx)} disabled={rubricItems.length === 1} className="p-2 text-red-600 hover:bg-red-50 rounded-lg">
+                  <div key={idx} className="flex gap-3 items-center">
+                    <input
+                      type="text"
+                      value={item.name}
+                      onChange={(e) => updateRubricItem(idx, 'name', e.target.value)}
+                      placeholder="Criterion name"
+                      className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    />
+                    <input
+                      type="number"
+                      value={item.maxPoints}
+                      onChange={(e) => updateRubricItem(idx, 'maxPoints', e.target.value)}
+                      placeholder="Points"
+                      min="0"
+                      className="w-24 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    />
+                    <button
+                      onClick={() => removeRubricItem(idx)}
+                      disabled={rubricItems.length === 1}
+                      className="p-2 text-red-600 hover:bg-red-50 rounded-lg disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
                       <Icon name="trash-2" className="w-5 h-5" />
                     </button>
                   </div>
                 ))}
               </div>
-              <div className="mt-4 p-4 bg-blue-50 rounded-lg">
-                <p className="text-sm font-semibold text-blue-900">Total Points: {calculateMaxTotal()}</p>
+              <p className="text-sm text-gray-500 mt-2">Total Points: {calculateMaxTotal()}</p>
+            </div>
+
+            <div className="mb-6">
+              <label className="block text-sm font-medium text-gray-700 mb-2">Student Order (drag to reorder)</label>
+              <div className="space-y-2 max-h-64 overflow-y-auto bg-gray-50 rounded-lg p-4">
+                {orderedStudents.map((student, idx) => (
+                  <div key={student.id} className="flex items-center gap-3 bg-white p-3 rounded-lg border border-gray-200">
+                    <div className="flex flex-col gap-1">
+                      <button
+                        onClick={() => moveStudent(student.id, 'up')}
+                        disabled={idx === 0}
+                        className="p-1 hover:bg-gray-100 rounded disabled:opacity-30"
+                      >
+                        <Icon name="chevron-up" className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => moveStudent(student.id, 'down')}
+                        disabled={idx === orderedStudents.length - 1}
+                        className="p-1 hover:bg-gray-100 rounded disabled:opacity-30"
+                      >
+                        <Icon name="chevron-down" className="w-4 h-4" />
+                      </button>
+                    </div>
+                    <div className="flex-1">
+                      <p className="font-medium text-gray-900">{student.name}</p>
+                      <p className="text-xs text-gray-500">ID: {student.studentId}</p>
+                    </div>
+                    <span className="text-sm text-gray-400">#{idx + 1}</span>
+                  </div>
+                ))}
               </div>
             </div>
 
-            <div className="mb-8">
-              <label className="block text-sm font-semibold text-gray-900 mb-2">Student Roster ({students.length} students)</label>
-              <div className="bg-gray-50 rounded-lg p-4 max-h-48 overflow-y-auto">
-                <div className="grid grid-cols-2 gap-2">
-                  {students.map(student => <div key={student.id} className="text-sm text-gray-700">• {student.name}</div>)}
-                </div>
-              </div>
-            </div>
-
-            <button onClick={startGrading} className="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg">Start Grading Session</button>
+            <button
+              onClick={startGradingSession}
+              disabled={!assignmentName.trim()}
+              className="w-full py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+            >
+              Start Grading Session
+            </button>
           </div>
         </div>
       </div>
     );
   }
 
-  // Grading
-  const orderedStudents = studentOrder.map(id => students.find(s => s.id === id)).filter(Boolean);
-
-  return (
-    <div className="min-h-screen bg-gray-50">
-      <header className="bg-white border-b border-gray-200 px-6 py-4">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <div className="min-w-0">
-            <h1 className="text-2xl font-bold text-gray-900 truncate">{assignmentName || 'Untitled Assignment'}</h1>
-            <p className="text-sm text-gray-500 mt-1 truncate">{selectedTeacher?.name} - {selectedSection?.name}</p>
-          </div>
-          <div className="flex items-center gap-4">
-            {pendingCount > 0 && (
-              <div className="text-xs text-orange-700 bg-orange-100 border border-orange-200 rounded px-2 py-1">
-                {pendingCount} chunk{pendingCount>1?'s':''} uploading…
+  if (step === 'grading') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
+        <div className="max-w-7xl mx-auto">
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h1 className="text-2xl font-bold text-gray-900">{assignmentName}</h1>
+                <p className="text-sm text-gray-600">{selectedTeacher?.name} • {selectedSection?.name}</p>
+              </div>
+              <div className="flex items-center gap-4">
+                {pendingCount > 0 && (
+                  <div className="flex items-center gap-2 px-3 py-1 bg-orange-100 text-orange-700 rounded-full text-sm font-medium">
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-orange-600"></div>
+                    {pendingCount} processing
+                  </div>
+                )}
+                {uploadComplete && (
+                  <div className="flex items-center gap-2 px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm font-medium">
+                    <Icon name="check-circle" className="w-4 h-4" />
+                    Uploaded
+                  </div>
+                )}
+                <button
+                  onClick={uploadGradesToAirtable}
+                  disabled={isUploading || Object.values(grades).filter(g => g.completed).length === 0}
+                  className="px-4 py-2 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+                >
+                  {isUploading ? (
+                    <>
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                      Uploading {uploadProgress.current}/{uploadProgress.total}
+                    </>
+                  ) : (
+                    <>
+                      <Icon name="upload" className="w-4 h-4" />
+                      Upload to Airtable
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={() => {
+                    if (confirm('Exit grading session? Unsaved grades will be lost.')) {
+                      setStep('teacher-select');
+                      setSelectedTeacher(null);
+                      setSelectedSection(null);
+                      setStudents([]);
+                      setGrades({});
+                      setTranscript([]);
+                      setUploadComplete(false);
+                      if (isRecording) stopRecording();
+                    }
+                  }}
+                  className="px-4 py-2 bg-gray-600 text-white font-semibold rounded-lg hover:bg-gray-700 transition-colors"
+                >
+                  Exit Session
+                </button>
+              </div>
+            </div>
+            {error && (
+              <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+                <p className="text-sm text-red-600">{error}</p>
               </div>
             )}
-            <button onClick={() => setStep('setup')} className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Back</button>
-            <button onClick={saveToAirtable} className="flex items-center gap-2 px-4 py-2 text-white bg-green-600 hover:bg-green-700 rounded-lg">
-              <Icon name="download" className="w-4 h-4" /> Save to Airtable
-            </button>
           </div>
-        </div>
-      </header>
 
-      <div className="max-w-7xl mx-auto px-6 py-6">
-        <div className="grid grid-cols-3 gap-6">
-          <div className="col-span-1 space-y-6">
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">Recording</h2>
-              <div className="flex flex-col items-center gap-4">
+          <div className="grid grid-cols-3 gap-6">
+            <div className="space-y-6">
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+                <h2 className="text-lg font-semibold text-gray-900 mb-4">Voice Recording</h2>
                 <button
-                  onClick={isRecording ? stopRecording : startRecording}
-                  className={`w-20 h-20 rounded-full flex items-center justify-center ${isRecording ? 'bg-red-500 hover:bg-red-600 animate-pulse' : 'bg-blue-500 hover:bg-blue-600'}`}
-                  title={isRecording ? 'Stop' : 'Start'}>
+                  onClick={toggleRecording}
+                  className={`w-20 h-20 rounded-full flex items-center justify-center mb-4 mx-auto transition-all ${isRecording ? 'bg-red-500 hover:bg-red-600 animate-pulse' : 'bg-blue-600 hover:bg-blue-700'}`}
+                >
                   <Icon name={isRecording ? 'square' : 'mic'} className="w-8 h-8 text-white" />
                 </button>
                 <div className="text-center">
@@ -821,7 +825,7 @@ function GradingInterface() {
             </div>
           </div>
 
-          <div className="col-span-2">
+          <div className="col-span-2 mt-6">
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
               <h2 className="text-lg font-semibold text-gray-900 mb-4">
                 Student Progress ({Object.values(grades).filter(g => g.completed).length}/{students.length})
@@ -927,8 +931,10 @@ function GradingInterface() {
 
         </div>
       </div>
-    </div>
-  );
+    );
+  }
+
+  return null;
 }
 
 ReactDOM.render(<GradingInterface />, document.getElementById('root'));
