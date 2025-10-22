@@ -367,6 +367,7 @@ function GradingInterface() {
             }
           }));
           setCurrentStudent(student.name);
+          bumpStudentDown(student.id);
         } else {
           setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: result.transcript || `Processed chunk ${chunkNum} (no matching student found).`, isProcessing: false } : e));
         }
@@ -412,6 +413,17 @@ function GradingInterface() {
 
   const calculateMaxTotal = () => {
     return rubricItems.reduce((sum, item) => sum + item.maxPoints, 0);
+  };
+
+  // Move a student one position down in the visible order when graded
+  const bumpStudentDown = (studentId) => {
+    setStudentOrder(prev => {
+      const idx = prev.indexOf(studentId);
+      if (idx === -1 || idx === prev.length - 1) return prev; // already last or not found
+      const next = [...prev];
+      [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+      return next;
+    });
   };
 
   const getInitials = (name) => {
@@ -531,12 +543,14 @@ function GradingInterface() {
       });
 
       // Upload Grade Scores in batches
-      const scoreChunks = chunk(scoreRecordsToCreate, 10);
-      for (let i = 0; i < scoreChunks.length; i++) {
-        await airtableRequest(CONFIG.TABLES.GRADE_SCORES, {
-          method: 'POST',
-          body: JSON.stringify({ records: scoreChunks[i] })
-        });
+      if (scoreRecordsToCreate.length > 0) {
+        const scoreChunks = chunk(scoreRecordsToCreate, 10);
+        for (let i = 0; i < scoreChunks.length; i++) {
+          await airtableRequest(CONFIG.TABLES.GRADE_SCORES, {
+            method: 'POST',
+            body: JSON.stringify({ records: scoreChunks[i] })
+          });
+        }
       }
 
       setUploadComplete(true);
