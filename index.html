@@ -1513,17 +1513,21 @@ function GradingInterface() {
           <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
             <div className="flex items-center justify-between">
               <div>
-                <h1 className="text-3xl font-bold text-gray-900">{assignmentName} - Results</h1>
-                <p className="text-gray-600 mt-1">{selectedTeacher?.name} • {selectedSection?.name}</p>
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="w-12 h-12 rounded-full bg-green-100 flex items-center justify-center">
+                    <Icon name="check-circle" className="w-7 h-7 text-green-600" />
+                  </div>
+                  <div>
+                    <h1 className="text-3xl font-bold text-gray-900">Upload Complete!</h1>
+                    <p className="text-green-600 font-semibold">Grades successfully saved to Airtable</p>
+                  </div>
+                </div>
+                <p className="text-gray-600 mt-2">{assignmentName} • {selectedTeacher?.name} • {selectedSection?.name}</p>
                 <p className="text-sm text-gray-500 mt-1">
                   {completedCount} of {students.length} students graded • Max Points: {maxTotal}
                 </p>
               </div>
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-2 px-4 py-2 bg-green-100 text-green-700 rounded-lg font-medium">
-                  <Icon name="check-circle" className="w-5 h-5" />
-                  Successfully Uploaded to Airtable
-                </div>
+              <div className="flex flex-col items-end gap-3">
                 <button
                   onClick={() => {
                     setStep('teacher-select');
@@ -1532,13 +1536,26 @@ function GradingInterface() {
                     setStudents([]);
                     setGrades({});
                     setTranscript([]);
+                    setRecordingSegments([]);
+                    completedRecordingsRef.current = [];
                     setUploadComplete(false);
                     setAssignmentName('');
+                    setSessionId(null);
                   }}
-                  className="px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors"
+                  className="px-6 py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2 shadow-lg"
                 >
-                  Start New Session
+                  <Icon name="plus-circle" className="w-5 h-5" />
+                  Start New Grading Session
                 </button>
+                {recordingSegments.length > 0 && (
+                  <button
+                    onClick={downloadAllRecordings}
+                    className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors flex items-center gap-2"
+                  >
+                    <Icon name="download" className="w-4 h-4" />
+                    Download All Recordings
+                  </button>
+                )}
               </div>
             </div>
           </div>
