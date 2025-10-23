@@ -104,13 +104,13 @@ function GradingInterface() {
   const [sortField, setSortField] = useState('name');
   const [sortDirection, setSortDirection] = useState('asc');
 
-  // NEW: Continuous recording refs
+  // NEW: Separate recording approach - each spacebar press creates a new recording
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
-  const allRecordedChunksRef = useRef([]); // Store ALL chunks for final export
-  const processingChunksRef = useRef([]); // Temporary chunks for spacebar processing
-  const lastChunkTimeRef = useRef(0); // Track when last chunk was sent
-  const MIN_CHUNK_INTERVAL_MS = 2000; // Minimum 2 seconds between chunks
+  const currentRecordingChunksRef = useRef([]); // Current recording chunks
+  const completedRecordingsRef = useRef([]); // Array of completed recordings: {id, blob, studentName, timestamp}
+  const recordingStartTimeRef = useRef(null);
+  const [recordingSegments, setRecordingSegments] = useState([]); // For displaying tokens
 
   useEffect(() => {
     if (CONFIG.AIRTABLE_API_KEY === 'YOUR_AIRTABLE_API_KEY_HERE') {
@@ -247,38 +247,44 @@ function GradingInterface() {
     setStep('grading');
   };
 
-  // NEW: Start continuous recording
+  // NEW: Start recording (creates first segment)
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
-      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-      mediaRecorderRef.current = recorder;
       
-      allRecordedChunksRef.current = [];
-      processingChunksRef.current = [];
-      lastChunkTimeRef.current = 0; // Reset timing
+      startNewRecordingSegment();
       
-      recorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) {
-          console.log('Received audio chunk:', e.data.size, 'bytes');
-          allRecordedChunksRef.current.push(e.data); // Store for final export
-          processingChunksRef.current.push(e.data); // Store for spacebar processing
-        }
-      };
-      
-      // Start WITHOUT timeslice - we'll manually request data with requestData()
-      recorder.start();
       setIsRecording(true);
       setIsPaused(false);
       setRecordingTime(0);
       setMicError(null);
       
-      console.log('Recording started - speak and press SPACEBAR to send chunks');
+      console.log('Recording started - speak and press SPACEBAR to finish this segment and start next');
     } catch (err) {
       console.error('Microphone error:', err);
       setMicError('Microphone access denied');
     }
+  };
+
+  // Start a new recording segment
+  const startNewRecordingSegment = () => {
+    if (!mediaStreamRef.current) return;
+    
+    const recorder = new MediaRecorder(mediaStreamRef.current, { mimeType: 'audio/webm' });
+    mediaRecorderRef.current = recorder;
+    currentRecordingChunksRef.current = [];
+    recordingStartTimeRef.current = Date.now();
+    
+    recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) {
+        currentRecordingChunksRef.current.push(e.data);
+        console.log('Received chunk:', e.data.size, 'bytes. Total chunks:', currentRecordingChunksRef.current.length);
+      }
+    };
+    
+    recorder.start();
+    console.log('New recording segment started');
   };
 
   // NEW: Pause recording
@@ -297,120 +303,154 @@ function GradingInterface() {
     }
   };
 
-  // NEW: Finish and export recording
+  // NEW: Finish and export all recordings
   const finishRecording = async () => {
     if (!mediaRecorderRef.current) return;
     
-    return new Promise((resolve) => {
-      const rec = mediaRecorderRef.current;
-      rec.onstop = async () => {
-        if (mediaStreamRef.current) {
-          mediaStreamRef.current.getTracks().forEach(track => track.stop());
-          mediaStreamRef.current = null;
-        }
-        
-        // Create final audio file from all recorded chunks
-        if (allRecordedChunksRef.current.length > 0) {
-          const fullBlob = new Blob(allRecordedChunksRef.current, { type: 'audio/webm' });
-          const url = URL.createObjectURL(fullBlob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `${assignmentName.replace(/\s+/g, '_')}_${sessionId}.webm`;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-        }
-        
-        setIsRecording(false);
-        setIsPaused(false);
-        mediaRecorderRef.current = null;
-        resolve();
-      };
-      rec.stop();
+    // Stop current segment if it has audio
+    if (currentRecordingChunksRef.current.length > 0) {
+      await sendChunkToWebhook(); // Process the last segment
+    }
+    
+    // Stop media stream
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(track => track.stop());
+      mediaStreamRef.current = null;
+    }
+    
+    setIsRecording(false);
+    setIsPaused(false);
+    mediaRecorderRef.current = null;
+    
+    console.log(`Recording session finished. Total segments: ${completedRecordingsRef.current.length}`);
+  };
+
+  // Download individual recording
+  const downloadRecording = (recordingData) => {
+    const url = URL.createObjectURL(recordingData.blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const studentName = recordingData.studentName || `segment-${recordingData.chunkNumber}`;
+    a.download = `${assignmentName.replace(/\s+/g, '_')}_${studentName.replace(/\s+/g, '_')}_${recordingData.chunkNumber}.webm`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // Download all recordings as individual files
+  const downloadAllRecordings = () => {
+    completedRecordingsRef.current.forEach((recording, idx) => {
+      setTimeout(() => {
+        downloadRecording(recording);
+      }, idx * 300); // Stagger downloads
     });
   };
 
-  // NEW: Send chunk to webhook (triggered by spacebar)
+  // NEW: Finish current recording segment and start a new one (triggered by spacebar)
   const sendChunkToWebhook = async () => {
-    const now = Date.now();
-    const timeSinceLastChunk = now - lastChunkTimeRef.current;
-    
     if (isFlushingRef.current) {
-      console.log('Already processing a chunk, skipping...');
+      console.log('Already processing a segment, skipping...');
       setTranscript(prev => [...prev, { 
         id: Date.now(), 
-        text: '⚠️ Still processing previous chunk. Please wait...', 
+        text: '⚠️ Still processing previous segment. Please wait...', 
         isProcessing: false 
       }]);
       return;
     }
     
-    // Check minimum time between chunks (first chunk can skip this)
-    if (lastChunkTimeRef.current !== 0 && timeSinceLastChunk < MIN_CHUNK_INTERVAL_MS) {
-      const waitTime = Math.ceil((MIN_CHUNK_INTERVAL_MS - timeSinceLastChunk) / 1000);
-      console.log(`Too soon since last chunk. Need to wait ${waitTime} more seconds`);
+    if (!mediaRecorderRef.current || currentRecordingChunksRef.current.length === 0) {
+      console.log('No recording to process yet');
       setTranscript(prev => [...prev, { 
         id: Date.now(), 
-        text: `⚠️ Please wait ${waitTime} more second(s) before sending next chunk. Keep speaking!`, 
-        isProcessing: false 
-      }]);
-      return;
-    }
-
-    // Manually request data from MediaRecorder before processing
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      console.log('Requesting data from MediaRecorder...');
-      mediaRecorderRef.current.requestData();
-      
-      // Wait a brief moment for requestData to trigger ondataavailable
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
-    
-    if (processingChunksRef.current.length === 0) {
-      console.log('No audio chunks to process yet - buffer is empty');
-      setTranscript(prev => [...prev, { 
-        id: Date.now(), 
-        text: '⚠️ No audio captured yet. Speak for a few seconds before pressing spacebar.', 
+        text: '⚠️ No audio recorded yet. Speak for a few seconds before pressing spacebar.', 
         isProcessing: false 
       }]);
       return;
     }
 
     isFlushingRef.current = true;
-
-    const chunksToSend = [...processingChunksRef.current];
-    processingChunksRef.current = []; // Clear processing buffer for next chunk
-    lastChunkTimeRef.current = now; // Update last chunk time
-    
     const chunkNum = ++chunkIdRef.current;
+    const segmentId = Date.now();
+    const recordingDuration = Date.now() - recordingStartTimeRef.current;
+    
+    console.log(`[Segment ${chunkNum}] Stopping current recording...`);
+
+    // Stop the current recorder and wait for final data
+    const currentRecorder = mediaRecorderRef.current;
+    
+    await new Promise((resolve) => {
+      currentRecorder.onstop = () => {
+        console.log(`[Segment ${chunkNum}] Recorder stopped, processing...`);
+        resolve();
+      };
+      currentRecorder.stop();
+    });
+
+    // Create blob from recorded chunks
+    const chunksToSend = [...currentRecordingChunksRef.current];
     const blob = new Blob(chunksToSend, { type: 'audio/webm' });
     
-    console.log(`[Chunk ${chunkNum}] Created blob from ${chunksToSend.length} pieces, total size: ${blob.size} bytes (${Math.round(blob.size / 1024)}KB)`);
+    console.log(`[Segment ${chunkNum}] Created blob from ${chunksToSend.length} chunks, size: ${Math.round(blob.size / 1024)}KB, duration: ${(recordingDuration/1000).toFixed(1)}s`);
     
-    // More strict size validation - WebM header is ~50 bytes, audio should be much larger
-    if (blob.size < 5000) { // Require at least 5KB of data
-      console.log(`[Chunk ${chunkNum}] Blob too small! Only ${blob.size} bytes. Need to speak longer.`);
+    // Validate size
+    if (blob.size < 5000) {
+      console.log(`[Segment ${chunkNum}] Recording too small (${blob.size} bytes), skipping...`);
       isFlushingRef.current = false;
       setTranscript(prev => [...prev, { 
         id: Date.now(), 
-        text: `⚠️ Audio chunk too small (${blob.size} bytes). Speak for at least 2-3 seconds before pressing spacebar.`, 
+        text: `⚠️ Recording too short (${(recordingDuration/1000).toFixed(1)}s). Speak longer before pressing spacebar.`, 
         isProcessing: false 
       }]);
+      
+      // Restart recording
+      if (isRecording && !isPaused) {
+        startNewRecordingSegment();
+      }
       return;
     }
+
+    // Save this recording
+    const recordingData = {
+      id: segmentId,
+      blob: blob,
+      chunkNumber: chunkNum,
+      timestamp: new Date().toLocaleTimeString(),
+      duration: recordingDuration,
+      size: blob.size,
+      studentName: null // Will be filled in when webhook returns
+    };
+    
+    completedRecordingsRef.current.push(recordingData);
+    
+    // Add token to UI
+    setRecordingSegments(prev => [...prev, {
+      id: segmentId,
+      chunkNumber: chunkNum,
+      timestamp: recordingData.timestamp,
+      duration: recordingDuration,
+      size: blob.size,
+      studentName: null,
+      status: 'processing'
+    }]);
     
     const entryId = Date.now();
-    
-    console.log(`[Chunk ${chunkNum}] Preparing to send, size: ${Math.round(blob.size / 1024)}KB, chunks count: ${chunksToSend.length}, time since last: ${lastChunkTimeRef.current === now ? 'first chunk' : (timeSinceLastChunk/1000).toFixed(1) + 's'}`);
-    setTranscript(prev => [...prev, { id: entryId, text: `⏳ Processing chunk ${chunkNum}... (${Math.round(blob.size / 1024)}KB)`, isProcessing: true }]);
+    setTranscript(prev => [...prev, { 
+      id: entryId, 
+      text: `⏳ Processing segment ${chunkNum}... (${Math.round(blob.size / 1024)}KB, ${(recordingDuration/1000).toFixed(1)}s)`, 
+      isProcessing: true 
+    }]);
     setPendingCount(prev => prev + 1);
 
+    // Start new recording immediately
+    if (isRecording && !isPaused) {
+      startNewRecordingSegment();
+    }
+
+    // Process the audio with n8n
     try {
       const base64 = await blobToBase64(blob);
-      const filename = `chunk-${sessionId}-${chunkNum}.webm`;
-      
-      console.log(`[Chunk ${chunkNum}] Base64 encoded, length: ${base64.length} characters`);
+      const filename = `segment-${sessionId}-${chunkNum}.webm`;
       
       const roster = students.map(s => ({
         id: s.id,
@@ -440,7 +480,7 @@ function GradingInterface() {
         roster
       };
       
-      console.log(`[Chunk ${chunkNum}] Sending to n8n...`);
+      console.log(`[Segment ${chunkNum}] Sending to n8n...`);
       
       const response = await fetch(CONFIG.N8N_WEBHOOK_URL, {
         method: 'POST',
@@ -448,16 +488,16 @@ function GradingInterface() {
         body: JSON.stringify(payload)
       });
       
-      console.log(`[Chunk ${chunkNum}] Response status: ${response.status}`);
+      console.log(`[Segment ${chunkNum}] Response status: ${response.status}`);
       
       if (!response.ok) {
         const errorText = await response.text().catch(() => 'Unknown error');
-        console.error(`[Chunk ${chunkNum}] Error response:`, errorText);
+        console.error(`[Segment ${chunkNum}] Error response:`, errorText);
         throw new Error(`n8n webhook error (${response.status}): ${errorText}`);
       }
       
       const result = await response.json();
-      console.log(`[Chunk ${chunkNum}] Result:`, result);
+      console.log(`[Segment ${chunkNum}] Result:`, result);
       
       if (result && (result.studentName || result.studentId) && result.scores) {
         let student = null;
@@ -474,6 +514,17 @@ function GradingInterface() {
           const line = `${student.name}. ${Object.entries(result.scores).map(([k, v]) => `${k} ${v}`).join(', ')}${result.comments ? `. ${result.comments}` : ''}`;
           setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: line, isProcessing: false } : e));
           
+          // Update the recording segment with student name
+          setRecordingSegments(prev => prev.map(seg => 
+            seg.id === segmentId ? { ...seg, studentName: student.name, status: 'completed' } : seg
+          ));
+          
+          // Update stored recording
+          const recordingIndex = completedRecordingsRef.current.findIndex(r => r.id === segmentId);
+          if (recordingIndex !== -1) {
+            completedRecordingsRef.current[recordingIndex].studentName = student.name;
+          }
+          
           setGrades(prev => ({
             ...prev,
             [student.id]: {
@@ -484,28 +535,36 @@ function GradingInterface() {
           }));
           setCurrentStudent(student.name);
           bumpStudentDown(student.id);
-          console.log(`[Chunk ${chunkNum}] ✅ Successfully processed for ${student.name}`);
+          console.log(`[Segment ${chunkNum}] ✅ Successfully processed for ${student.name}`);
         } else {
-          setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: result.transcript || `Processed chunk ${chunkNum} (no matching student found).`, isProcessing: false } : e));
-          console.log(`[Chunk ${chunkNum}] Processed but no student match found`);
+          setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: result.transcript || `Processed segment ${chunkNum} (no matching student found).`, isProcessing: false } : e));
+          setRecordingSegments(prev => prev.map(seg => 
+            seg.id === segmentId ? { ...seg, status: 'no-match' } : seg
+          ));
+          console.log(`[Segment ${chunkNum}] Processed but no student match found`);
         }
       } else {
-        setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: result.transcript || `Chunk ${chunkNum} processed.`, isProcessing: false } : e));
-        console.log(`[Chunk ${chunkNum}] Processed without grade data`);
+        setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: result.transcript || `Segment ${chunkNum} processed.`, isProcessing: false } : e));
+        setRecordingSegments(prev => prev.map(seg => 
+          seg.id === segmentId ? { ...seg, status: 'completed' } : seg
+        ));
+        console.log(`[Segment ${chunkNum}] Processed without grade data`);
       }
       
     } catch (err) {
-      console.error(`[Chunk ${chunkNum}] Processing error:`, err);
+      console.error(`[Segment ${chunkNum}] Processing error:`, err);
       const errorMessage = err.message.includes('n8n') 
-        ? `n8n error on chunk ${chunkNum}. Check workflow logs: ${err.message}`
+        ? `n8n error on segment ${chunkNum}: ${err.message}`
         : `Processing error: ${err.message}`;
       setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: `❌ ${errorMessage}`, isProcessing: false } : e));
+      setRecordingSegments(prev => prev.map(seg => 
+        seg.id === segmentId ? { ...seg, status: 'error' } : seg
+      ));
     } finally {
       setPendingCount(prev => Math.max(0, prev - 1));
-      // Add a small delay before allowing next chunk to prevent overwhelming n8n
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise(resolve => setTimeout(resolve, 300));
       isFlushingRef.current = false;
-      console.log(`[Chunk ${chunkNum}] Processing complete, ready for next chunk`);
+      console.log(`[Segment ${chunkNum}] Processing complete`);
     }
   };
 
@@ -1017,10 +1076,11 @@ function GradingInterface() {
                     <div className="mt-2 p-3 bg-blue-50 rounded-lg border border-blue-200 w-full">
                       <p className="text-xs font-semibold text-blue-900 mb-1">How to use:</p>
                       <p className="text-xs text-blue-800">
-                        🎤 Speak continuously<br/>
-                        ⌨️ Press SPACE to process chunk<br/>
+                        🎤 Speak about one student<br/>
+                        ⌨️ Press SPACE to finish & start next<br/>
                         ⏸️ Pause when needed<br/>
-                        ⏹️ Finish to download recording
+                        ⏹️ Finish to end session<br/>
+                        💾 Download recordings anytime
                       </p>
                     </div>
                   )}
@@ -1041,6 +1101,60 @@ function GradingInterface() {
                     <span className="text-sm font-bold text-blue-600">/{calculateMaxTotal()}</span>
                   </div>
                 </div>
+              </div>
+
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold text-gray-900">Recording Segments ({recordingSegments.length})</h2>
+                  {recordingSegments.length > 0 && (
+                    <button
+                      onClick={downloadAllRecordings}
+                      className="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 flex items-center gap-1"
+                    >
+                      <Icon name="download" className="w-4 h-4" />
+                      Download All
+                    </button>
+                  )}
+                </div>
+                {recordingSegments.length === 0 ? (
+                  <p className="text-sm text-gray-400 italic">No recordings yet. Press SPACEBAR to finish first segment.</p>
+                ) : (
+                  <div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto">
+                    {recordingSegments.map((segment) => (
+                      <div
+                        key={segment.id}
+                        onClick={() => {
+                          const recording = completedRecordingsRef.current.find(r => r.id === segment.id);
+                          if (recording) downloadRecording(recording);
+                        }}
+                        className={`px-3 py-2 rounded-lg border cursor-pointer transition-all hover:shadow-md ${
+                          segment.status === 'completed' ? 'bg-green-50 border-green-300' :
+                          segment.status === 'processing' ? 'bg-yellow-50 border-yellow-300 animate-pulse' :
+                          segment.status === 'error' ? 'bg-red-50 border-red-300' :
+                          'bg-gray-50 border-gray-300'
+                        }`}
+                        title="Click to download"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Icon name={
+                            segment.status === 'completed' ? 'check-circle' :
+                            segment.status === 'processing' ? 'loader' :
+                            segment.status === 'error' ? 'x-circle' :
+                            'help-circle'
+                          } className="w-4 h-4" />
+                          <div>
+                            <p className="text-xs font-semibold">
+                              {segment.studentName || `Segment ${segment.chunkNumber}`}
+                            </p>
+                            <p className="text-xs text-gray-500">
+                              {(segment.duration / 1000).toFixed(1)}s • {Math.round(segment.size / 1024)}KB
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
