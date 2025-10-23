@@ -305,7 +305,7 @@ function GradingInterface() {
     }
   };
 
-  // NEW: Finish and export all recordings
+  // NEW: Finish recording (just stops, doesn't change screen)
   const finishRecording = async () => {
     if (!mediaRecorderRef.current) return;
     
@@ -324,10 +324,7 @@ function GradingInterface() {
     setIsPaused(false);
     mediaRecorderRef.current = null;
     
-    // Move to review step instead of auto-uploading
-    setStep('review');
-    
-    console.log(`Recording session finished. Total segments: ${completedRecordingsRef.current.length}`);
+    console.log(`Recording stopped. Total segments: ${completedRecordingsRef.current.length}`);
   };
 
   // Download individual recording
@@ -383,16 +380,6 @@ function GradingInterface() {
 
   // NEW: Finish current recording segment and start a new one (triggered by spacebar)
   const sendChunkToWebhook = async () => {
-    if (isFlushingRef.current) {
-      console.log('Already processing a segment, skipping...');
-      setTranscript(prev => [...prev, { 
-        id: Date.now(), 
-        text: '⚠️ Still processing previous segment. Please wait...', 
-        isProcessing: false 
-      }]);
-      return;
-    }
-    
     if (!mediaRecorderRef.current || mediaRecorderRef.current.state !== 'recording') {
       console.log('No active recording');
       setTranscript(prev => [...prev, { 
@@ -403,7 +390,6 @@ function GradingInterface() {
       return;
     }
 
-    isFlushingRef.current = true;
     const chunkNum = ++chunkIdRef.current;
     const segmentId = Date.now();
     const recordingDuration = Date.now() - recordingStartTimeRef.current;
@@ -429,7 +415,6 @@ function GradingInterface() {
     
     if (chunksToSend.length === 0) {
       console.log(`[Segment ${chunkNum}] No audio chunks collected!`);
-      isFlushingRef.current = false;
       setTranscript(prev => [...prev, { 
         id: Date.now(), 
         text: '⚠️ No audio recorded. Speak for a few seconds before pressing spacebar.', 
@@ -450,7 +435,6 @@ function GradingInterface() {
     // Validate size
     if (blob.size < 5000) {
       console.log(`[Segment ${chunkNum}] Recording too small (${blob.size} bytes), skipping...`);
-      isFlushingRef.current = false;
       setTranscript(prev => [...prev, { 
         id: Date.now(), 
         text: `⚠️ Recording too short (${(recordingDuration/1000).toFixed(1)}s). Speak longer before pressing spacebar.`, 
@@ -501,7 +485,12 @@ function GradingInterface() {
       startNewRecordingSegment();
     }
 
-    // Process the audio with n8n
+    // Process the audio with n8n (run asynchronously, don't block)
+    processSegmentWithN8N(segmentId, chunkNum, blob, entryId);
+  };
+
+  // Process segment with n8n (runs independently, doesn't block)
+  const processSegmentWithN8N = async (segmentId, chunkNum, blob, entryId) => {
     try {
       const base64 = await blobToBase64(blob);
       const filename = `segment-${sessionId}-${chunkNum}.webm`;
@@ -616,8 +605,6 @@ function GradingInterface() {
       ));
     } finally {
       setPendingCount(prev => Math.max(0, prev - 1));
-      await new Promise(resolve => setTimeout(resolve, 300));
-      isFlushingRef.current = false;
       console.log(`[Segment ${chunkNum}] Processing complete`);
     }
   };
@@ -1033,6 +1020,14 @@ function GradingInterface() {
                     {pendingCount} processing
                   </div>
                 )}
+                <button
+                  onClick={() => setStep('review')}
+                  disabled={Object.values(grades).filter(g => g.completed).length === 0}
+                  className="px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+                >
+                  <Icon name="clipboard-check" className="w-4 h-4" />
+                  Review & Upload
+                </button>
                 <button
                   onClick={async () => {
                     if (confirm('Exit grading session? Unsaved grades will be lost.')) {
