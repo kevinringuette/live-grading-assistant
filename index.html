@@ -257,14 +257,14 @@ function GradingInterface() {
       processingChunksRef.current = [];
       
       recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) {
+        if (e.data && e.data.size > 0) {
           allRecordedChunksRef.current.push(e.data); // Store for final export
           processingChunksRef.current.push(e.data); // Store for spacebar processing
         }
       };
       
-      // Request data every 100ms to ensure continuous capture
-      recorder.start(100);
+      // Request data every 500ms to ensure we have enough audio
+      recorder.start(500);
       setIsRecording(true);
       setIsPaused(false);
       setRecordingTime(0);
@@ -327,7 +327,21 @@ function GradingInterface() {
 
   // NEW: Send chunk to webhook (triggered by spacebar)
   const sendChunkToWebhook = async () => {
-    if (isFlushingRef.current || processingChunksRef.current.length === 0) return;
+    if (isFlushingRef.current) {
+      console.log('Already processing a chunk, skipping...');
+      return;
+    }
+    
+    if (processingChunksRef.current.length === 0) {
+      console.log('No audio chunks to process yet');
+      setTranscript(prev => [...prev, { 
+        id: Date.now(), 
+        text: '⚠️ No audio captured yet. Speak for a few seconds before pressing spacebar.', 
+        isProcessing: false 
+      }]);
+      return;
+    }
+
     isFlushingRef.current = true;
 
     const chunksToSend = [...processingChunksRef.current];
@@ -335,9 +349,22 @@ function GradingInterface() {
     
     const chunkNum = ++chunkIdRef.current;
     const blob = new Blob(chunksToSend, { type: 'audio/webm' });
+    
+    // Check if blob has actual audio data
+    if (blob.size < 100) {
+      console.log('Blob too small, skipping:', blob.size);
+      isFlushingRef.current = false;
+      setTranscript(prev => [...prev, { 
+        id: Date.now(), 
+        text: '⚠️ Audio chunk too small. Speak longer before pressing spacebar.', 
+        isProcessing: false 
+      }]);
+      return;
+    }
+    
     const entryId = Date.now();
     
-    setTranscript(prev => [...prev, { id: entryId, text: `⏳ Processing chunk ${chunkNum}...`, isProcessing: true }]);
+    setTranscript(prev => [...prev, { id: entryId, text: `⏳ Processing chunk ${chunkNum}... (${Math.round(blob.size / 1024)}KB)`, isProcessing: true }]);
     setPendingCount(prev => prev + 1);
 
     try {
@@ -370,6 +397,8 @@ function GradingInterface() {
         rubric: rubricItems,
         roster
       };
+      
+      console.log(`Sending chunk ${chunkNum}, size: ${blob.size} bytes`);
       
       const response = await fetch(CONFIG.N8N_WEBHOOK_URL, {
         method: 'POST',
