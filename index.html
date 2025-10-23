@@ -279,12 +279,13 @@ function GradingInterface() {
     recorder.ondataavailable = (e) => {
       if (e.data && e.data.size > 0) {
         currentRecordingChunksRef.current.push(e.data);
-        console.log('Received chunk:', e.data.size, 'bytes. Total chunks:', currentRecordingChunksRef.current.length);
+        console.log('Received chunk:', e.data.size, 'bytes. Total chunks:', currentRecordingChunksRef.current.length, 'Total size:', currentRecordingChunksRef.current.reduce((sum, chunk) => sum + chunk.size, 0), 'bytes');
       }
     };
     
-    recorder.start();
-    console.log('New recording segment started');
+    // Use timeslice so ondataavailable fires regularly
+    recorder.start(1000); // Request data every second
+    console.log('New recording segment started with 1s timeslice');
   };
 
   // NEW: Pause recording
@@ -359,11 +360,11 @@ function GradingInterface() {
       return;
     }
     
-    if (!mediaRecorderRef.current || currentRecordingChunksRef.current.length === 0) {
-      console.log('No recording to process yet');
+    if (!mediaRecorderRef.current || mediaRecorderRef.current.state !== 'recording') {
+      console.log('No active recording');
       setTranscript(prev => [...prev, { 
         id: Date.now(), 
-        text: '⚠️ No audio recorded yet. Speak for a few seconds before pressing spacebar.', 
+        text: '⚠️ Recording not active. Please start recording first.', 
         isProcessing: false 
       }]);
       return;
@@ -374,24 +375,44 @@ function GradingInterface() {
     const segmentId = Date.now();
     const recordingDuration = Date.now() - recordingStartTimeRef.current;
     
-    console.log(`[Segment ${chunkNum}] Stopping current recording...`);
+    console.log(`[Segment ${chunkNum}] Stopping current recording (duration: ${(recordingDuration/1000).toFixed(1)}s)...`);
 
     // Stop the current recorder and wait for final data
     const currentRecorder = mediaRecorderRef.current;
     
     await new Promise((resolve) => {
       currentRecorder.onstop = () => {
-        console.log(`[Segment ${chunkNum}] Recorder stopped, processing...`);
+        console.log(`[Segment ${chunkNum}] Recorder stopped. Collected ${currentRecordingChunksRef.current.length} chunks`);
         resolve();
       };
       currentRecorder.stop();
     });
 
+    // Give a brief moment for any final ondataavailable events
+    await new Promise(resolve => setTimeout(resolve, 100));
+
     // Create blob from recorded chunks
     const chunksToSend = [...currentRecordingChunksRef.current];
+    
+    if (chunksToSend.length === 0) {
+      console.log(`[Segment ${chunkNum}] No audio chunks collected!`);
+      isFlushingRef.current = false;
+      setTranscript(prev => [...prev, { 
+        id: Date.now(), 
+        text: '⚠️ No audio recorded. Speak for a few seconds before pressing spacebar.', 
+        isProcessing: false 
+      }]);
+      
+      // Restart recording
+      if (isRecording && !isPaused) {
+        startNewRecordingSegment();
+      }
+      return;
+    }
+    
     const blob = new Blob(chunksToSend, { type: 'audio/webm' });
     
-    console.log(`[Segment ${chunkNum}] Created blob from ${chunksToSend.length} chunks, size: ${Math.round(blob.size / 1024)}KB, duration: ${(recordingDuration/1000).toFixed(1)}s`);
+    console.log(`[Segment ${chunkNum}] Created blob from ${chunksToSend.length} chunks, total size: ${blob.size} bytes (${Math.round(blob.size / 1024)}KB)`);
     
     // Validate size
     if (blob.size < 5000) {
