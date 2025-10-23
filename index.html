@@ -261,17 +261,20 @@ function GradingInterface() {
       
       recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) {
+          console.log('Received audio chunk:', e.data.size, 'bytes');
           allRecordedChunksRef.current.push(e.data); // Store for final export
           processingChunksRef.current.push(e.data); // Store for spacebar processing
         }
       };
       
-      // Request data every 500ms to ensure we have enough audio
-      recorder.start(500);
+      // Start WITHOUT timeslice - we'll manually request data with requestData()
+      recorder.start();
       setIsRecording(true);
       setIsPaused(false);
       setRecordingTime(0);
       setMicError(null);
+      
+      console.log('Recording started - speak and press SPACEBAR to send chunks');
     } catch (err) {
       console.error('Microphone error:', err);
       setMicError('Microphone access denied');
@@ -343,7 +346,7 @@ function GradingInterface() {
       return;
     }
     
-    // Check minimum time between chunks
+    // Check minimum time between chunks (first chunk can skip this)
     if (lastChunkTimeRef.current !== 0 && timeSinceLastChunk < MIN_CHUNK_INTERVAL_MS) {
       const waitTime = Math.ceil((MIN_CHUNK_INTERVAL_MS - timeSinceLastChunk) / 1000);
       console.log(`Too soon since last chunk. Need to wait ${waitTime} more seconds`);
@@ -354,9 +357,18 @@ function GradingInterface() {
       }]);
       return;
     }
+
+    // Manually request data from MediaRecorder before processing
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      console.log('Requesting data from MediaRecorder...');
+      mediaRecorderRef.current.requestData();
+      
+      // Wait a brief moment for requestData to trigger ondataavailable
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
     
     if (processingChunksRef.current.length === 0) {
-      console.log('No audio chunks to process yet');
+      console.log('No audio chunks to process yet - buffer is empty');
       setTranscript(prev => [...prev, { 
         id: Date.now(), 
         text: '⚠️ No audio captured yet. Speak for a few seconds before pressing spacebar.', 
@@ -368,15 +380,17 @@ function GradingInterface() {
     isFlushingRef.current = true;
 
     const chunksToSend = [...processingChunksRef.current];
-    processingChunksRef.current = []; // Clear processing buffer
+    processingChunksRef.current = []; // Clear processing buffer for next chunk
     lastChunkTimeRef.current = now; // Update last chunk time
     
     const chunkNum = ++chunkIdRef.current;
     const blob = new Blob(chunksToSend, { type: 'audio/webm' });
     
+    console.log(`[Chunk ${chunkNum}] Created blob from ${chunksToSend.length} pieces, total size: ${blob.size} bytes (${Math.round(blob.size / 1024)}KB)`);
+    
     // More strict size validation - WebM header is ~50 bytes, audio should be much larger
     if (blob.size < 5000) { // Require at least 5KB of data
-      console.log('Blob too small, only:', blob.size, 'bytes');
+      console.log(`[Chunk ${chunkNum}] Blob too small! Only ${blob.size} bytes. Need to speak longer.`);
       isFlushingRef.current = false;
       setTranscript(prev => [...prev, { 
         id: Date.now(), 
@@ -388,13 +402,15 @@ function GradingInterface() {
     
     const entryId = Date.now();
     
-    console.log(`[Chunk ${chunkNum}] Preparing to send, size: ${Math.round(blob.size / 1024)}KB, chunks count: ${chunksToSend.length}, time since last: ${(timeSinceLastChunk/1000).toFixed(1)}s`);
+    console.log(`[Chunk ${chunkNum}] Preparing to send, size: ${Math.round(blob.size / 1024)}KB, chunks count: ${chunksToSend.length}, time since last: ${lastChunkTimeRef.current === now ? 'first chunk' : (timeSinceLastChunk/1000).toFixed(1) + 's'}`);
     setTranscript(prev => [...prev, { id: entryId, text: `⏳ Processing chunk ${chunkNum}... (${Math.round(blob.size / 1024)}KB)`, isProcessing: true }]);
     setPendingCount(prev => prev + 1);
 
     try {
       const base64 = await blobToBase64(blob);
       const filename = `chunk-${sessionId}-${chunkNum}.webm`;
+      
+      console.log(`[Chunk ${chunkNum}] Base64 encoded, length: ${base64.length} characters`);
       
       const roster = students.map(s => ({
         id: s.id,
@@ -468,7 +484,7 @@ function GradingInterface() {
           }));
           setCurrentStudent(student.name);
           bumpStudentDown(student.id);
-          console.log(`[Chunk ${chunkNum}] Successfully processed for ${student.name}`);
+          console.log(`[Chunk ${chunkNum}] ✅ Successfully processed for ${student.name}`);
         } else {
           setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: result.transcript || `Processed chunk ${chunkNum} (no matching student found).`, isProcessing: false } : e));
           console.log(`[Chunk ${chunkNum}] Processed but no student match found`);
