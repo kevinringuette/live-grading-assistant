@@ -32,7 +32,7 @@ const CONFIG = {
     TEACHERS: { NAME: 'Name', EMAIL: 'Email', FIRST_NAME: 'First Name', LAST_NAME: 'Last Name', SECTIONS: 'Master Sections' },
     SECTIONS: { NAME: 'Section Name', SECTION_ID: 'Section ID', TEACHER_LINK: 'Teacher Link', STUDENT_ROSTER: 'Student Roster' },
     STUDENTS: { NAME: 'Name', EMAIL: 'Email', ID: 'ID', SECTIONS: 'Master Sections' },
-    GRADES: { ASSIGNMENT: 'Assignment', STUDENT: 'Student', COMMENTS: 'Comments', FINAL_GRADE: 'Final Grade' },
+    GRADES: { ASSIGNMENT: 'Assignment', STUDENT: 'Student', COMMENTS: 'Comments', FINAL_GRADE: 'Final Grade', SECTION: 'Section' },
     GRADE_SCORES: { GRADE: 'Grade', LABEL: 'Label', SCORE: 'Score', MAX: 'Max Points' }
   }
 };
@@ -102,6 +102,10 @@ function GradingInterface() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
   const [uploadComplete, setUploadComplete] = useState(false);
+
+  // Results table sorting
+  const [sortField, setSortField] = useState('name'); // 'name', 'total', or rubric item name
+  const [sortDirection, setSortDirection] = useState('asc'); // 'asc' or 'desc'
 
   // MediaRecorder refs
   const mediaRecorderRef = useRef(null);
@@ -474,6 +478,49 @@ function GradingInterface() {
     return sections.filter(s => s.name.toLowerCase().includes(q) || (s.sectionId || '').toLowerCase().includes(q));
   }, [sections, sectionQuery]);
 
+  const toggleSort = (field) => {
+    if (sortField === field) {
+      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortDirection('asc');
+    }
+  };
+
+  const sortedStudentsForResults = useMemo(() => {
+    const studentsWithGrades = students.map(student => {
+      const grade = grades[student.id] || { scores: {}, comments: '', completed: false };
+      return { ...student, grade, total: calculateTotal(grade) };
+    });
+
+    return studentsWithGrades.sort((a, b) => {
+      let aVal, bVal;
+      
+      if (sortField === 'name') {
+        aVal = a.name;
+        bVal = b.name;
+      } else if (sortField === 'total') {
+        aVal = a.total;
+        bVal = b.total;
+      } else if (sortField === 'status') {
+        aVal = a.grade.completed ? 1 : 0;
+        bVal = b.grade.completed ? 1 : 0;
+      } else {
+        // Sorting by rubric item
+        aVal = a.grade.scores[sortField] || 0;
+        bVal = b.grade.scores[sortField] || 0;
+      }
+
+      if (typeof aVal === 'string') {
+        return sortDirection === 'asc' 
+          ? aVal.localeCompare(bVal)
+          : bVal.localeCompare(aVal);
+      } else {
+        return sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
+      }
+    });
+  }, [students, grades, sortField, sortDirection, rubricItems]);
+
   // NEW: Upload grades to Airtable
   const uploadGradesToAirtable = async () => {
     if (isUploading) return;
@@ -503,6 +550,7 @@ function GradingInterface() {
           fields: {
             [CONFIG.FIELDS.GRADES.ASSIGNMENT]: assignmentName,
             [CONFIG.FIELDS.GRADES.STUDENT]: [studentId], // Link to student record
+            [CONFIG.FIELDS.GRADES.SECTION]: [selectedSection.id], // Link to section record
             [CONFIG.FIELDS.GRADES.COMMENTS]: gradeData.comments || '',
             [CONFIG.FIELDS.GRADES.FINAL_GRADE]: total
           }
@@ -554,7 +602,7 @@ function GradingInterface() {
       }
 
       setUploadComplete(true);
-      alert(`Successfully uploaded ${completedGrades.length} grade(s) with ${scoreRecordsToCreate.length} rubric scores to Airtable!`);
+      setStep('results'); // Move to results view
       
     } catch (err) {
       console.error('Upload error:', err);
@@ -979,6 +1027,197 @@ function GradingInterface() {
             </div>
           </div>
 
+        </div>
+      </div>
+    );
+  }
+
+  if (step === 'results') {
+    const completedCount = Object.values(grades).filter(g => g.completed).length;
+    const maxTotal = calculateMaxTotal();
+    
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
+        <div className="max-w-7xl mx-auto">
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h1 className="text-3xl font-bold text-gray-900">{assignmentName} - Results</h1>
+                <p className="text-gray-600 mt-1">{selectedTeacher?.name} • {selectedSection?.name}</p>
+                <p className="text-sm text-gray-500 mt-1">
+                  {completedCount} of {students.length} students graded • Max Points: {maxTotal}
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 px-4 py-2 bg-green-100 text-green-700 rounded-lg font-medium">
+                  <Icon name="check-circle" className="w-5 h-5" />
+                  Successfully Uploaded to Airtable
+                </div>
+                <button
+                  onClick={() => {
+                    setStep('teacher-select');
+                    setSelectedTeacher(null);
+                    setSelectedSection(null);
+                    setStudents([]);
+                    setGrades({});
+                    setTranscript([]);
+                    setUploadComplete(false);
+                    setAssignmentName('');
+                  }}
+                  className="px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors"
+                >
+                  Start New Session
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead className="bg-gray-50 border-b border-gray-200">
+                  <tr>
+                    <th 
+                      onClick={() => toggleSort('name')}
+                      className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                    >
+                      <div className="flex items-center gap-2">
+                        Student Name
+                        {sortField === 'name' && (
+                          <Icon name={sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'} className="w-4 h-4" />
+                        )}
+                      </div>
+                    </th>
+                    <th 
+                      onClick={() => toggleSort('status')}
+                      className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                    >
+                      <div className="flex items-center gap-2">
+                        Status
+                        {sortField === 'status' && (
+                          <Icon name={sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'} className="w-4 h-4" />
+                        )}
+                      </div>
+                    </th>
+                    {rubricItems.map(item => (
+                      <th 
+                        key={item.name}
+                        onClick={() => toggleSort(item.name)}
+                        className="px-6 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                      >
+                        <div className="flex items-center justify-center gap-2">
+                          {item.name}
+                          {sortField === item.name && (
+                            <Icon name={sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'} className="w-4 h-4" />
+                          )}
+                        </div>
+                        <div className="text-xs font-normal text-gray-500 mt-1">/ {item.maxPoints}</div>
+                      </th>
+                    ))}
+                    <th 
+                      onClick={() => toggleSort('total')}
+                      className="px-6 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                    >
+                      <div className="flex items-center justify-center gap-2">
+                        Total
+                        {sortField === 'total' && (
+                          <Icon name={sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'} className="w-4 h-4" />
+                        )}
+                      </div>
+                      <div className="text-xs font-normal text-gray-500 mt-1">/ {maxTotal}</div>
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                      Comments
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {sortedStudentsForResults.map((student, idx) => {
+                    const isCompleted = student.grade.completed;
+                    const rowClass = isCompleted ? 'bg-green-50' : 'bg-white';
+                    
+                    return (
+                      <tr key={student.id} className={`${rowClass} hover:bg-blue-50 transition-colors`}>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <div className="flex items-center">
+                            <div className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold text-sm ${isCompleted ? 'bg-green-100 text-green-600' : 'bg-gray-100 text-gray-600'}`}>
+                              {getInitials(student.name)}
+                            </div>
+                            <div className="ml-3">
+                              <div className="text-sm font-medium text-gray-900">{student.name}</div>
+                              <div className="text-xs text-gray-500">ID: {student.studentId}</div>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          {isCompleted ? (
+                            <span className="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
+                              Graded
+                            </span>
+                          ) : (
+                            <span className="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800">
+                              Not Graded
+                            </span>
+                          )}
+                        </td>
+                        {rubricItems.map(item => (
+                          <td key={item.name} className="px-6 py-4 text-center whitespace-nowrap">
+                            <span className={`text-sm font-semibold ${isCompleted ? 'text-gray-900' : 'text-gray-400'}`}>
+                              {student.grade.scores[item.name] ?? '--'}
+                            </span>
+                          </td>
+                        ))}
+                        <td className="px-6 py-4 text-center whitespace-nowrap">
+                          <span className={`text-lg font-bold ${isCompleted ? 'text-gray-900' : 'text-gray-400'}`}>
+                            {isCompleted ? student.total : '--'}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="text-sm text-gray-700 max-w-xs truncate" title={student.grade.comments}>
+                            {student.grade.comments || <span className="text-gray-400 italic">No comments</span>}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="mt-6 bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">Summary Statistics</h2>
+            <div className="grid grid-cols-4 gap-4">
+              <div className="text-center p-4 bg-blue-50 rounded-lg">
+                <p className="text-3xl font-bold text-blue-600">{completedCount}</p>
+                <p className="text-sm text-gray-600 mt-1">Students Graded</p>
+              </div>
+              <div className="text-center p-4 bg-purple-50 rounded-lg">
+                <p className="text-3xl font-bold text-purple-600">
+                  {completedCount > 0 
+                    ? Math.round(sortedStudentsForResults.filter(s => s.grade.completed).reduce((sum, s) => sum + s.total, 0) / completedCount)
+                    : '--'}
+                </p>
+                <p className="text-sm text-gray-600 mt-1">Average Score</p>
+              </div>
+              <div className="text-center p-4 bg-green-50 rounded-lg">
+                <p className="text-3xl font-bold text-green-600">
+                  {completedCount > 0
+                    ? Math.max(...sortedStudentsForResults.filter(s => s.grade.completed).map(s => s.total))
+                    : '--'}
+                </p>
+                <p className="text-sm text-gray-600 mt-1">Highest Score</p>
+              </div>
+              <div className="text-center p-4 bg-orange-50 rounded-lg">
+                <p className="text-3xl font-bold text-orange-600">
+                  {completedCount > 0
+                    ? Math.min(...sortedStudentsForResults.filter(s => s.grade.completed).map(s => s.total))
+                    : '--'}
+                </p>
+                <p className="text-sm text-gray-600 mt-1">Lowest Score</p>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     );
