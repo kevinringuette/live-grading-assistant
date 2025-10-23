@@ -109,6 +109,8 @@ function GradingInterface() {
   const mediaStreamRef = useRef(null);
   const allRecordedChunksRef = useRef([]); // Store ALL chunks for final export
   const processingChunksRef = useRef([]); // Temporary chunks for spacebar processing
+  const lastChunkTimeRef = useRef(0); // Track when last chunk was sent
+  const MIN_CHUNK_INTERVAL_MS = 2000; // Minimum 2 seconds between chunks
 
   useEffect(() => {
     if (CONFIG.AIRTABLE_API_KEY === 'YOUR_AIRTABLE_API_KEY_HERE') {
@@ -255,6 +257,7 @@ function GradingInterface() {
       
       allRecordedChunksRef.current = [];
       processingChunksRef.current = [];
+      lastChunkTimeRef.current = 0; // Reset timing
       
       recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) {
@@ -327,8 +330,28 @@ function GradingInterface() {
 
   // NEW: Send chunk to webhook (triggered by spacebar)
   const sendChunkToWebhook = async () => {
+    const now = Date.now();
+    const timeSinceLastChunk = now - lastChunkTimeRef.current;
+    
     if (isFlushingRef.current) {
       console.log('Already processing a chunk, skipping...');
+      setTranscript(prev => [...prev, { 
+        id: Date.now(), 
+        text: '⚠️ Still processing previous chunk. Please wait...', 
+        isProcessing: false 
+      }]);
+      return;
+    }
+    
+    // Check minimum time between chunks
+    if (lastChunkTimeRef.current !== 0 && timeSinceLastChunk < MIN_CHUNK_INTERVAL_MS) {
+      const waitTime = Math.ceil((MIN_CHUNK_INTERVAL_MS - timeSinceLastChunk) / 1000);
+      console.log(`Too soon since last chunk. Need to wait ${waitTime} more seconds`);
+      setTranscript(prev => [...prev, { 
+        id: Date.now(), 
+        text: `⚠️ Please wait ${waitTime} more second(s) before sending next chunk. Keep speaking!`, 
+        isProcessing: false 
+      }]);
       return;
     }
     
@@ -346,17 +369,18 @@ function GradingInterface() {
 
     const chunksToSend = [...processingChunksRef.current];
     processingChunksRef.current = []; // Clear processing buffer
+    lastChunkTimeRef.current = now; // Update last chunk time
     
     const chunkNum = ++chunkIdRef.current;
     const blob = new Blob(chunksToSend, { type: 'audio/webm' });
     
-    // Check if blob has actual audio data
-    if (blob.size < 100) {
-      console.log('Blob too small, skipping:', blob.size);
+    // More strict size validation - WebM header is ~50 bytes, audio should be much larger
+    if (blob.size < 5000) { // Require at least 5KB of data
+      console.log('Blob too small, only:', blob.size, 'bytes');
       isFlushingRef.current = false;
       setTranscript(prev => [...prev, { 
         id: Date.now(), 
-        text: '⚠️ Audio chunk too small. Speak longer before pressing spacebar.', 
+        text: `⚠️ Audio chunk too small (${blob.size} bytes). Speak for at least 2-3 seconds before pressing spacebar.`, 
         isProcessing: false 
       }]);
       return;
@@ -364,12 +388,13 @@ function GradingInterface() {
     
     const entryId = Date.now();
     
+    console.log(`[Chunk ${chunkNum}] Preparing to send, size: ${Math.round(blob.size / 1024)}KB, chunks count: ${chunksToSend.length}, time since last: ${(timeSinceLastChunk/1000).toFixed(1)}s`);
     setTranscript(prev => [...prev, { id: entryId, text: `⏳ Processing chunk ${chunkNum}... (${Math.round(blob.size / 1024)}KB)`, isProcessing: true }]);
     setPendingCount(prev => prev + 1);
 
     try {
       const base64 = await blobToBase64(blob);
-      const filename = `chunk-${Date.now()}.webm`;
+      const filename = `chunk-${sessionId}-${chunkNum}.webm`;
       
       const roster = students.map(s => ({
         id: s.id,
@@ -387,6 +412,7 @@ function GradingInterface() {
         },
         session: {
           id: sessionId || '',
+          chunkNumber: chunkNum,
           assignment: assignmentName || '',
           teacherName: selectedTeacher?.name || '',
           teacherEmail: selectedTeacher?.email || '',
@@ -398,7 +424,7 @@ function GradingInterface() {
         roster
       };
       
-      console.log(`Sending chunk ${chunkNum}, size: ${blob.size} bytes`);
+      console.log(`[Chunk ${chunkNum}] Sending to n8n...`);
       
       const response = await fetch(CONFIG.N8N_WEBHOOK_URL, {
         method: 'POST',
@@ -406,12 +432,16 @@ function GradingInterface() {
         body: JSON.stringify(payload)
       });
       
+      console.log(`[Chunk ${chunkNum}] Response status: ${response.status}`);
+      
       if (!response.ok) {
         const errorText = await response.text().catch(() => 'Unknown error');
+        console.error(`[Chunk ${chunkNum}] Error response:`, errorText);
         throw new Error(`n8n webhook error (${response.status}): ${errorText}`);
       }
       
       const result = await response.json();
+      console.log(`[Chunk ${chunkNum}] Result:`, result);
       
       if (result && (result.studentName || result.studentId) && result.scores) {
         let student = null;
@@ -438,22 +468,28 @@ function GradingInterface() {
           }));
           setCurrentStudent(student.name);
           bumpStudentDown(student.id);
+          console.log(`[Chunk ${chunkNum}] Successfully processed for ${student.name}`);
         } else {
           setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: result.transcript || `Processed chunk ${chunkNum} (no matching student found).`, isProcessing: false } : e));
+          console.log(`[Chunk ${chunkNum}] Processed but no student match found`);
         }
       } else {
         setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: result.transcript || `Chunk ${chunkNum} processed.`, isProcessing: false } : e));
+        console.log(`[Chunk ${chunkNum}] Processed without grade data`);
       }
       
     } catch (err) {
-      console.error('Processing error:', err);
+      console.error(`[Chunk ${chunkNum}] Processing error:`, err);
       const errorMessage = err.message.includes('n8n') 
-        ? `n8n webhook error - Check your webhook: ${err.message}`
+        ? `n8n error on chunk ${chunkNum}. Check workflow logs: ${err.message}`
         : `Processing error: ${err.message}`;
       setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: `❌ ${errorMessage}`, isProcessing: false } : e));
     } finally {
       setPendingCount(prev => Math.max(0, prev - 1));
+      // Add a small delay before allowing next chunk to prevent overwhelming n8n
+      await new Promise(resolve => setTimeout(resolve, 500));
       isFlushingRef.current = false;
+      console.log(`[Chunk ${chunkNum}] Processing complete, ready for next chunk`);
     }
   };
 
