@@ -542,42 +542,75 @@ function GradingInterface() {
       const result = await response.json();
       console.log(`[Segment ${chunkNum}] Result:`, result);
       
-      // Handle multiple students in one response
-      const studentsData = result.students || (result.studentName ? [result] : []);
+      // Handle multiple students in one response - support both array and object formats
+      let studentsData = [];
+      if (Array.isArray(result)) {
+        // Direct array: [{studentName, scores}, ...]
+        studentsData = result;
+        console.log(`[Segment ${chunkNum}] Received array with ${studentsData.length} student(s)`);
+      } else if (result.students && Array.isArray(result.students)) {
+        // Object format: {students: [{...}, {...}]}
+        studentsData = result.students;
+        console.log(`[Segment ${chunkNum}] Received object with ${studentsData.length} student(s)`);
+      } else if (result.studentName && result.scores) {
+        // Single student format: {studentName, scores}
+        studentsData = [result];
+        console.log(`[Segment ${chunkNum}] Received single student`);
+      } else {
+        console.log(`[Segment ${chunkNum}] Unrecognized format:`, result);
+      }
       
       if (studentsData.length > 0) {
         let transcriptLines = [];
+        let matchedStudents = [];
         
-        studentsData.forEach((studentResult) => {
+        studentsData.forEach((studentResult, idx) => {
+          console.log(`[Segment ${chunkNum}] Processing student ${idx + 1}/${studentsData.length}:`, studentResult.studentName, 'ID:', studentResult.studentId);
+          
           if (studentResult.studentName && studentResult.scores) {
             let student = null;
+            
+            // Try to match by student ID first
             if (studentResult.studentId) {
-              student = students.find(s => s.studentId?.toString() === String(studentResult.studentId)) ||
+              student = students.find(s => String(s.studentId) === String(studentResult.studentId)) ||
                         students.find(s => s.id === studentResult.studentId);
+              if (student) {
+                console.log(`[Segment ${chunkNum}]   ✓ Matched by ID: ${student.name}`);
+              } else {
+                console.log(`[Segment ${chunkNum}]   ✗ No match by ID ${studentResult.studentId}`);
+              }
             }
+            
+            // If not found, try to match by name
             if (!student && studentResult.studentName) {
               const target = String(studentResult.studentName).trim().toLowerCase();
               student = students.find(s => (s.name || '').trim().toLowerCase() === target);
+              if (student) {
+                console.log(`[Segment ${chunkNum}]   ✓ Matched by name: ${student.name}`);
+              } else {
+                console.log(`[Segment ${chunkNum}]   ✗ No match by name "${studentResult.studentName}"`);
+              }
             }
 
             if (student) {
               const line = `${student.name}. ${Object.entries(studentResult.scores).map(([k, v]) => `${k} ${v}`).join(', ')}${studentResult.comments ? `. ${studentResult.comments}` : ''}`;
               transcriptLines.push(line);
+              matchedStudents.push(student.name);
               
               setGrades(prev => ({
                 ...prev,
                 [student.id]: {
-                  scores: { ...prev[student.id].scores, ...studentResult.scores },
-                  comments: studentResult.comments || prev[student.id].comments,
+                  scores: { ...prev[student.id]?.scores || {}, ...studentResult.scores },
+                  comments: studentResult.comments || prev[student.id]?.comments || '',
                   completed: true
                 }
               }));
               setCurrentStudent(student.name);
               bumpStudentDown(student.id);
-              console.log(`[Segment ${chunkNum}] ✅ Successfully processed for ${student.name}`);
+              console.log(`[Segment ${chunkNum}] ✅ Graded ${student.name}`);
             } else {
               transcriptLines.push(`${studentResult.studentName} (no match in roster)`);
-              console.log(`[Segment ${chunkNum}] Student not found: ${studentResult.studentName}`);
+              console.log(`[Segment ${chunkNum}] ❌ Student not in roster: ${studentResult.studentName}`);
             }
           }
         });
@@ -594,10 +627,18 @@ function GradingInterface() {
           setRecordingSegments(prev => prev.map(seg => 
             seg.id === segmentId ? { 
               ...seg, 
-              studentName: studentsData.map(s => s.studentName).join(', '),
+              studentName: matchedStudents.length > 0 ? matchedStudents.join(', ') : studentsData.map(s => s.studentName).join(', '),
               status: 'completed' 
             } : seg
           ));
+          
+          // Update stored recording
+          const recordingIndex = completedRecordingsRef.current.findIndex(r => r.id === segmentId);
+          if (recordingIndex !== -1) {
+            completedRecordingsRef.current[recordingIndex].studentName = matchedStudents.join(', ');
+          }
+          
+          console.log(`[Segment ${chunkNum}] Summary: ${matchedStudents.length}/${studentsData.length} students matched`);
         } else {
           setTranscript(prev => prev.map(e => e.id === entryId ? { 
             ...e, 
