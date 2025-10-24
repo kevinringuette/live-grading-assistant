@@ -722,16 +722,21 @@ function GradingInterface() {
           const formattedText = `📍 Segment ${chunkNum} (${(recordingDuration/1000).toFixed(1)}s)\n${transcriptLines.map(line => `  • ${line}`).join('\n')}`;
           
           // Add to TOP of transcript (newest first)
-          setTranscript(prev => [
-            { 
-              id: entryId, 
-              text: formattedText, 
-              isProcessing: false,
-              segmentNumber: chunkNum,
-              timestamp: new Date().toLocaleTimeString()
-            },
-            ...prev.filter(e => e.id !== entryId) // Remove the processing placeholder
-          ]);
+          setTranscript(prev => {
+            // Remove processing placeholder if it exists
+            const filtered = prev.filter(e => e.id !== entryId);
+            // Add completed entry at top
+            return [
+              { 
+                id: entryId, 
+                text: formattedText, 
+                isProcessing: false,
+                segmentNumber: chunkNum,
+                timestamp: new Date().toLocaleTimeString()
+              },
+              ...filtered
+            ];
+          });
           
           // Update recording segment status
           setRecordingSegments(prev => prev.map(seg => 
@@ -750,31 +755,37 @@ function GradingInterface() {
           
           console.log(`[Segment ${chunkNum}] ===== SUMMARY: ${matchedStudents.length}/${studentsData.length} students matched and graded =====`);
         } else {
-          setTranscript(prev => [
-            { 
-              id: entryId, 
-              text: `📍 Segment ${chunkNum} - No students matched`, 
-              isProcessing: false,
-              segmentNumber: chunkNum,
-              timestamp: new Date().toLocaleTimeString()
-            },
-            ...prev.filter(e => e.id !== entryId)
-          ]);
+          setTranscript(prev => {
+            const filtered = prev.filter(e => e.id !== entryId);
+            return [
+              { 
+                id: entryId, 
+                text: `📍 Segment ${chunkNum} - No students matched`, 
+                isProcessing: false,
+                segmentNumber: chunkNum,
+                timestamp: new Date().toLocaleTimeString()
+              },
+              ...filtered
+            ];
+          });
           setRecordingSegments(prev => prev.map(seg => 
             seg.id === segmentId ? { ...seg, status: 'no-match' } : seg
           ));
         }
       } else {
-        setTranscript(prev => [
-          { 
-            id: entryId, 
-            text: `📍 Segment ${chunkNum} - Processed without grade data`, 
-            isProcessing: false,
-            segmentNumber: chunkNum,
-            timestamp: new Date().toLocaleTimeString()
-          },
-          ...prev.filter(e => e.id !== entryId)
-        ]);
+        setTranscript(prev => {
+          const filtered = prev.filter(e => e.id !== entryId);
+          return [
+            { 
+              id: entryId, 
+              text: `📍 Segment ${chunkNum} - Processed without grade data`, 
+              isProcessing: false,
+              segmentNumber: chunkNum,
+              timestamp: new Date().toLocaleTimeString()
+            },
+            ...filtered
+          ];
+        });
         setRecordingSegments(prev => prev.map(seg => 
           seg.id === segmentId ? { ...seg, status: 'completed' } : seg
         ));
@@ -786,7 +797,18 @@ function GradingInterface() {
       const errorMessage = err.message.includes('n8n') 
         ? `n8n error on segment ${chunkNum}: ${err.message}`
         : `Processing error: ${err.message}`;
-      setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: `❌ ${errorMessage}`, isProcessing: false } : e));
+      setTranscript(prev => {
+        const filtered = prev.filter(e => e.id !== entryId);
+        return [
+          { 
+            id: entryId, 
+            text: `❌ ${errorMessage}`, 
+            isProcessing: false,
+            timestamp: new Date().toLocaleTimeString()
+          },
+          ...filtered
+        ];
+      });
       setRecordingSegments(prev => prev.map(seg => 
         seg.id === segmentId ? { ...seg, status: 'error' } : seg
       ));
