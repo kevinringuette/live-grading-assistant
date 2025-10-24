@@ -542,23 +542,44 @@ function GradingInterface() {
       const result = await response.json();
       console.log(`[Segment ${chunkNum}] Result:`, result);
       
-      // Handle multiple students in one response - support both array and object formats
+      // Handle multiple students in one response - support multiple n8n formats
       let studentsData = [];
-      if (Array.isArray(result)) {
-        // Direct array: [{studentName, scores}, ...]
+      
+      // Format 1: n8n aggregate wraps in array with data property: [{data: [...]}]
+      if (Array.isArray(result) && result.length > 0 && result[0].data && Array.isArray(result[0].data)) {
+        studentsData = result[0].data;
+        console.log(`[Segment ${chunkNum}] Received n8n aggregate format with ${studentsData.length} student(s)`);
+      }
+      // Format 2: Direct array: [{studentName, scores}, ...]
+      else if (Array.isArray(result) && result.length > 0 && result[0].studentName) {
         studentsData = result;
-        console.log(`[Segment ${chunkNum}] Received array with ${studentsData.length} student(s)`);
-      } else if (result.students && Array.isArray(result.students)) {
-        // Object format: {students: [{...}, {...}]}
+        console.log(`[Segment ${chunkNum}] Received direct array with ${studentsData.length} student(s)`);
+      }
+      // Format 3: Object with students property: {students: [{...}, {...}]}
+      else if (result.students && Array.isArray(result.students)) {
         studentsData = result.students;
-        console.log(`[Segment ${chunkNum}] Received object with ${studentsData.length} student(s)`);
-      } else if (result.studentName && result.scores) {
-        // Single student format: {studentName, scores}
+        console.log(`[Segment ${chunkNum}] Received object format with ${studentsData.length} student(s)`);
+      }
+      // Format 4: Single student object: {studentName, scores}
+      else if (result.studentName && result.scores) {
         studentsData = [result];
         console.log(`[Segment ${chunkNum}] Received single student`);
-      } else {
-        console.log(`[Segment ${chunkNum}] Unrecognized format:`, result);
       }
+      // Format 5: n8n aggregate single item with data property: {data: [...]}
+      else if (result.data && Array.isArray(result.data)) {
+        studentsData = result.data;
+        console.log(`[Segment ${chunkNum}] Received n8n object format with ${studentsData.length} student(s)`);
+      }
+      // Format 6: Empty array (might happen with n8n)
+      else if (Array.isArray(result) && result.length === 0) {
+        studentsData = [];
+        console.log(`[Segment ${chunkNum}] Received empty array`);
+      }
+      else {
+        console.log(`[Segment ${chunkNum}] ⚠️ Unrecognized format:`, result);
+      }
+      
+      console.log(`[Segment ${chunkNum}] Parsed ${studentsData.length} student(s) for processing`);
       
       if (studentsData.length > 0) {
         let transcriptLines = [];
