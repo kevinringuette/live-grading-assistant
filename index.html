@@ -564,6 +564,7 @@ function GradingInterface() {
         let transcriptLines = [];
         let matchedStudents = [];
         let gradeUpdates = {}; // Collect all grade updates
+        let studentIdsToMove = []; // Collect student IDs to move to top
         
         studentsData.forEach((studentResult, idx) => {
           console.log(`[Segment ${chunkNum}] Processing student ${idx + 1}/${studentsData.length}:`, studentResult.studentName, 'ID:', studentResult.studentId);
@@ -579,6 +580,8 @@ function GradingInterface() {
                 console.log(`[Segment ${chunkNum}]   ✓ Matched by ID: ${student.name}`);
               } else {
                 console.log(`[Segment ${chunkNum}]   ✗ No match by ID ${studentResult.studentId}`);
+                // Try to list all student IDs for debugging
+                console.log(`[Segment ${chunkNum}]   Available IDs:`, students.slice(0, 5).map(s => `${s.name}: ${s.studentId}`));
               }
             }
             
@@ -597,6 +600,7 @@ function GradingInterface() {
               const line = `${student.name}. ${Object.entries(studentResult.scores).map(([k, v]) => `${k} ${v}`).join(', ')}${studentResult.comments ? `. ${studentResult.comments}` : ''}`;
               transcriptLines.push(line);
               matchedStudents.push(student.name);
+              studentIdsToMove.push(student.id);
               
               // Collect grade update for this student
               gradeUpdates[student.id] = {
@@ -605,7 +609,7 @@ function GradingInterface() {
                 completed: true
               };
               
-              console.log(`[Segment ${chunkNum}] ✅ Will grade ${student.name}`);
+              console.log(`[Segment ${chunkNum}] ✅ Prepared grade for ${student.name}`, studentResult.scores);
             } else {
               transcriptLines.push(`${studentResult.studentName} (no match in roster)`);
               console.log(`[Segment ${chunkNum}] ❌ Student not in roster: ${studentResult.studentName}`);
@@ -613,33 +617,42 @@ function GradingInterface() {
           }
         });
         
-        // Apply all grade updates in a single batch
+        // Apply all updates in a single coordinated batch
         if (Object.keys(gradeUpdates).length > 0) {
-          console.log(`[Segment ${chunkNum}] Applying ${Object.keys(gradeUpdates).length} grade updates:`, Object.keys(gradeUpdates).map(id => students.find(s => s.id === id)?.name));
+          console.log(`[Segment ${chunkNum}] ===== APPLYING ${Object.keys(gradeUpdates).length} GRADE UPDATES =====`);
+          console.log(`[Segment ${chunkNum}] Students to update:`, matchedStudents);
+          console.log(`[Segment ${chunkNum}] Grade data:`, gradeUpdates);
           
+          // Update grades - single batch
           setGrades(prev => {
             const updated = { ...prev };
             Object.entries(gradeUpdates).forEach(([studentId, gradeData]) => {
+              const studentName = students.find(s => s.id === studentId)?.name;
+              console.log(`[Segment ${chunkNum}]   Setting grade for ${studentName} (${studentId}):`, gradeData);
               updated[studentId] = {
                 scores: { ...(prev[studentId]?.scores || {}), ...gradeData.scores },
                 comments: gradeData.comments || prev[studentId]?.comments || '',
                 completed: true
               };
             });
+            console.log(`[Segment ${chunkNum}] Updated grades state:`, Object.keys(updated).length, 'students');
             return updated;
           });
           
-          // Update current student and bump down for each
-          matchedStudents.forEach((studentName, idx) => {
-            const student = students.find(s => s.name === studentName);
-            if (student) {
-              if (idx === matchedStudents.length - 1) {
-                // Only set current student for the last one
-                setCurrentStudent(student.name);
-              }
-              bumpStudentDown(student.id);
-            }
+          // Update student order - move all graded students to top in reverse order
+          // (so the last one processed ends up at position 0)
+          setStudentOrder(prev => {
+            const remaining = prev.filter(id => !studentIdsToMove.includes(id));
+            // Add in reverse order so last one ends up first
+            const reordered = [...studentIdsToMove.reverse(), ...remaining];
+            console.log(`[Segment ${chunkNum}] Reordered students, moved to top:`, studentIdsToMove.map(id => students.find(s => s.id === id)?.name));
+            return reordered;
           });
+          
+          // Set current student to the last one processed
+          if (matchedStudents.length > 0) {
+            setCurrentStudent(matchedStudents[matchedStudents.length - 1]);
+          }
         }
         
         // Update transcript with all students from this segment
@@ -665,7 +678,7 @@ function GradingInterface() {
             completedRecordingsRef.current[recordingIndex].studentName = matchedStudents.join(', ');
           }
           
-          console.log(`[Segment ${chunkNum}] Summary: ${matchedStudents.length}/${studentsData.length} students matched and graded`);
+          console.log(`[Segment ${chunkNum}] ===== SUMMARY: ${matchedStudents.length}/${studentsData.length} students matched and graded =====`);
         } else {
           setTranscript(prev => prev.map(e => e.id === entryId ? { 
             ...e, 
