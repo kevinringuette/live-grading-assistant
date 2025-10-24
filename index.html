@@ -542,49 +542,71 @@ function GradingInterface() {
       const result = await response.json();
       console.log(`[Segment ${chunkNum}] Result:`, result);
       
-      if (result && (result.studentName || result.studentId) && result.scores) {
-        let student = null;
-        if (result.studentId) {
-          student = students.find(s => s.studentId?.toString() === String(result.studentId)) ||
-                    students.find(s => s.id === result.studentId);
-        }
-        if (!student && result.studentName) {
-          const target = String(result.studentName).trim().toLowerCase();
-          student = students.find(s => (s.name || '').trim().toLowerCase() === target);
-        }
-
-        if (student) {
-          const line = `${student.name}. ${Object.entries(result.scores).map(([k, v]) => `${k} ${v}`).join(', ')}${result.comments ? `. ${result.comments}` : ''}`;
-          setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: line, isProcessing: false } : e));
-          
-          // Update the recording segment with student name
-          setRecordingSegments(prev => prev.map(seg => 
-            seg.id === segmentId ? { ...seg, studentName: student.name, status: 'completed' } : seg
-          ));
-          
-          // Update stored recording
-          const recordingIndex = completedRecordingsRef.current.findIndex(r => r.id === segmentId);
-          if (recordingIndex !== -1) {
-            completedRecordingsRef.current[recordingIndex].studentName = student.name;
-          }
-          
-          setGrades(prev => ({
-            ...prev,
-            [student.id]: {
-              scores: { ...prev[student.id].scores, ...result.scores },
-              comments: result.comments || prev[student.id].comments,
-              completed: true
+      // Handle multiple students in one response
+      const studentsData = result.students || (result.studentName ? [result] : []);
+      
+      if (studentsData.length > 0) {
+        let transcriptLines = [];
+        
+        studentsData.forEach((studentResult) => {
+          if (studentResult.studentName && studentResult.scores) {
+            let student = null;
+            if (studentResult.studentId) {
+              student = students.find(s => s.studentId?.toString() === String(studentResult.studentId)) ||
+                        students.find(s => s.id === studentResult.studentId);
             }
-          }));
-          setCurrentStudent(student.name);
-          bumpStudentDown(student.id);
-          console.log(`[Segment ${chunkNum}] ✅ Successfully processed for ${student.name}`);
+            if (!student && studentResult.studentName) {
+              const target = String(studentResult.studentName).trim().toLowerCase();
+              student = students.find(s => (s.name || '').trim().toLowerCase() === target);
+            }
+
+            if (student) {
+              const line = `${student.name}. ${Object.entries(studentResult.scores).map(([k, v]) => `${k} ${v}`).join(', ')}${studentResult.comments ? `. ${studentResult.comments}` : ''}`;
+              transcriptLines.push(line);
+              
+              setGrades(prev => ({
+                ...prev,
+                [student.id]: {
+                  scores: { ...prev[student.id].scores, ...studentResult.scores },
+                  comments: studentResult.comments || prev[student.id].comments,
+                  completed: true
+                }
+              }));
+              setCurrentStudent(student.name);
+              bumpStudentDown(student.id);
+              console.log(`[Segment ${chunkNum}] ✅ Successfully processed for ${student.name}`);
+            } else {
+              transcriptLines.push(`${studentResult.studentName} (no match in roster)`);
+              console.log(`[Segment ${chunkNum}] Student not found: ${studentResult.studentName}`);
+            }
+          }
+        });
+        
+        // Update transcript with all students from this segment
+        if (transcriptLines.length > 0) {
+          setTranscript(prev => prev.map(e => e.id === entryId ? { 
+            ...e, 
+            text: transcriptLines.join(' | '), 
+            isProcessing: false 
+          } : e));
+          
+          // Update recording segment status
+          setRecordingSegments(prev => prev.map(seg => 
+            seg.id === segmentId ? { 
+              ...seg, 
+              studentName: studentsData.map(s => s.studentName).join(', '),
+              status: 'completed' 
+            } : seg
+          ));
         } else {
-          setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: result.transcript || `Processed segment ${chunkNum} (no matching student found).`, isProcessing: false } : e));
+          setTranscript(prev => prev.map(e => e.id === entryId ? { 
+            ...e, 
+            text: `Segment ${chunkNum} processed but no students matched`, 
+            isProcessing: false 
+          } : e));
           setRecordingSegments(prev => prev.map(seg => 
             seg.id === segmentId ? { ...seg, status: 'no-match' } : seg
           ));
-          console.log(`[Segment ${chunkNum}] Processed but no student match found`);
         }
       } else {
         setTranscript(prev => prev.map(e => e.id === entryId ? { ...e, text: result.transcript || `Segment ${chunkNum} processed.`, isProcessing: false } : e));
@@ -803,7 +825,9 @@ function GradingInterface() {
       }
 
       setUploadComplete(true);
+      console.log('Upload complete, setting step to results');
       setStep('results');
+      console.log('Step set to:', 'results');
       
     } catch (err) {
       console.error('Upload error:', err);
@@ -1711,7 +1735,35 @@ function GradingInterface() {
     );
   }
 
-  return null;
+  // Fallback for unknown step
+  console.log('Current step:', step);
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6 flex items-center justify-center">
+      <div className="bg-white rounded-lg shadow-lg p-8 max-w-md">
+        <h2 className="text-xl font-bold text-gray-900 mb-4">Unknown Step: {step}</h2>
+        <p className="text-gray-600 mb-4">Something went wrong. Current step is: "{step}"</p>
+        <button
+          onClick={() => {
+            console.log('Resetting to teacher-select');
+            setStep('teacher-select');
+            setSelectedTeacher(null);
+            setSelectedSection(null);
+            setStudents([]);
+            setGrades({});
+            setTranscript([]);
+            setRecordingSegments([]);
+            completedRecordingsRef.current = [];
+            setUploadComplete(false);
+            setAssignmentName('');
+            setSessionId(null);
+          }}
+          className="w-full px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700"
+        >
+          Return to Start
+        </button>
+      </div>
+    </div>
+  );
 }
 
 ReactDOM.render(<GradingInterface />, document.getElementById('root'));
