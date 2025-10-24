@@ -526,11 +526,11 @@ function GradingInterface() {
     }
 
     // Process the audio with n8n (run asynchronously, don't block)
-    processSegmentWithN8N(segmentId, chunkNum, blob, entryId);
+    processSegmentWithN8N(segmentId, chunkNum, blob, entryId, recordingDuration);
   };
 
   // Process segment with n8n (runs independently, doesn't block)
-  const processSegmentWithN8N = async (segmentId, chunkNum, blob, entryId) => {
+  const processSegmentWithN8N = async (segmentId, chunkNum, blob, entryId, recordingDuration) => {
     try {
       const base64 = await blobToBase64(blob);
       const filename = `segment-${sessionId}-${chunkNum}.webm`;
@@ -719,7 +719,7 @@ function GradingInterface() {
         // Update transcript with all students from this segment
         if (transcriptLines.length > 0) {
           // Format with line breaks for readability
-          const formattedText = `📍 Segment ${chunkNum} (${(recordingData?.duration / 1000).toFixed(1)}s)\n${transcriptLines.map(line => `  • ${line}`).join('\n')}`;
+          const formattedText = `📍 Segment ${chunkNum} (${(recordingDuration/1000).toFixed(1)}s)\n${transcriptLines.map(line => `  • ${line}`).join('\n')}`;
           
           // Add to TOP of transcript (newest first)
           setTranscript(prev => [
