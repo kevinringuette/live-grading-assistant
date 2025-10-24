@@ -700,20 +700,22 @@ function GradingInterface() {
             return updated;
           });
           
-          // Update student order - move all graded students to top in reverse order
-          // (so the last one processed ends up at position 0)
-          setStudentOrder(prev => {
-            const remaining = prev.filter(id => !studentIdsToMove.includes(id));
-            // Add in reverse order so last one ends up first
-            const reordered = [...studentIdsToMove.reverse(), ...remaining];
-            console.log(`[Segment ${chunkNum}] Reordered students, moved to top:`, studentIdsToMove.map(id => students.find(s => s.id === id)?.name));
-            return reordered;
-          });
-          
-          // Set current student to the last one processed
-          if (matchedStudents.length > 0) {
-            setCurrentStudent(matchedStudents[matchedStudents.length - 1]);
-          }
+          // Delay student reordering slightly to avoid React conflicts
+          setTimeout(() => {
+            // Update student order - move all graded students to top in reverse order
+            setStudentOrder(prev => {
+              const remaining = prev.filter(id => !studentIdsToMove.includes(id));
+              // Add in reverse order so last one ends up first
+              const reordered = [...studentIdsToMove.reverse(), ...remaining];
+              console.log(`[Segment ${chunkNum}] Reordered students, moved to top:`, studentIdsToMove.map(id => students.find(s => s.id === id)?.name));
+              return reordered;
+            });
+            
+            // Set current student to the last one processed
+            if (matchedStudents.length > 0) {
+              setCurrentStudent(matchedStudents[matchedStudents.length - 1]);
+            }
+          }, 50);
         }
         
         // Update transcript with all students from this segment
@@ -1013,8 +1015,15 @@ function GradingInterface() {
 
       setUploadComplete(true);
       console.log('Upload complete, setting step to results');
-      setStep('results');
-      console.log('Step set to:', 'results');
+      
+      // Force complete re-render by updating multiple states
+      setTimeout(() => {
+        setStep('results');
+        setIsUploading(false);
+        setError(null);
+        console.log('Step set to: results');
+        alert('Upload successful! You should now see the results screen.');
+      }, 100);
       
     } catch (err) {
       console.error('Upload error:', err);
@@ -1036,6 +1045,9 @@ function GradingInterface() {
     );
   }
 
+  console.log('Current step value:', step, 'Type:', typeof step);
+  console.log('Checking steps...');
+  
   if (step === 'teacher-select') {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-8">
@@ -1749,8 +1761,10 @@ function GradingInterface() {
   }
 
   if (step === 'results') {
+    console.log('RENDERING RESULTS SCREEN');
     const completedCount = Object.values(grades).filter(g => g.completed).length;
     const maxTotal = calculateMaxTotal();
+    console.log('Results screen data:', { completedCount, maxTotal, studentsLength: students.length });
     
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
