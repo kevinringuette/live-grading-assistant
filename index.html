@@ -8,6 +8,23 @@
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          animation: {
+            'fadeIn': 'fadeIn 0.3s ease-in-out'
+          },
+          keyframes: {
+            fadeIn: {
+              '0%': { opacity: '0', transform: 'scale(0.95)' },
+              '100%': { opacity: '1', transform: 'scale(1)' }
+            }
+          }
+        }
+      }
+    }
+  </script>
   <script src="https://unpkg.com/lucide@latest"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
@@ -101,6 +118,7 @@ function GradingInterface() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
   const [uploadComplete, setUploadComplete] = useState(false);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
 
   const [sortField, setSortField] = useState('name');
   const [sortDirection, setSortDirection] = useState('asc');
@@ -1038,11 +1056,10 @@ function GradingInterface() {
         }
       }
 
-      // Always show results screen if grades were saved
+      // Always show success modal if grades were saved
       setUploadComplete(true);
-      setStep('results');
-      setError(null);
-      console.log('Upload complete, navigating to results screen');
+      setShowSuccessModal(true);
+      console.log('Upload complete, showing success modal');
       
     } catch (err) {
       console.error('Upload error:', err);
@@ -1051,10 +1068,10 @@ function GradingInterface() {
     } finally {
       setIsUploading(false);
       
-      // Fallback: if grades were saved but we're not on results screen, go there anyway
-      if (gradesSaved && step !== 'results') {
-        console.log('Fallback: forcing navigation to results screen');
-        setStep('results');
+      // Fallback: if grades were saved but modal not shown, show it
+      if (gradesSaved && !showSuccessModal) {
+        console.log('Fallback: forcing success modal to show');
+        setShowSuccessModal(true);
       }
     }
   };
@@ -1778,6 +1795,87 @@ function GradingInterface() {
             )}
           </div>
         </div>
+
+        {/* Success Modal Overlay */}
+        {showSuccessModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-6">
+            <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-8 animate-fadeIn">
+              <div className="text-center">
+                {/* Big Green Checkmark */}
+                <div className="w-20 h-20 rounded-full bg-green-100 flex items-center justify-center mx-auto mb-6">
+                  <Icon name="check-circle" className="w-12 h-12 text-green-600" />
+                </div>
+                
+                {/* Success Message */}
+                <h1 className="text-4xl font-bold text-gray-900 mb-3">Upload Complete!</h1>
+                <p className="text-xl text-green-600 font-semibold mb-4">
+                  Grades successfully saved to Airtable
+                </p>
+                
+                {/* Session Details */}
+                <div className="bg-gray-50 rounded-lg p-4 mb-6">
+                  <p className="text-lg text-gray-700 font-medium">{assignmentName}</p>
+                  <p className="text-gray-600">{selectedTeacher?.name} • {selectedSection?.name}</p>
+                  <p className="text-sm text-gray-500 mt-2">
+                    {Object.values(grades).filter(g => g.completed).length} of {students.length} students graded • Max Points: {calculateMaxTotal()}
+                  </p>
+                </div>
+
+                {/* Action Buttons */}
+                <div className="flex flex-col gap-3">
+                  <button
+                    onClick={() => {
+                      setShowSuccessModal(false);
+                      setStep('teacher-select');
+                      setSelectedTeacher(null);
+                      setSelectedSection(null);
+                      setStudents([]);
+                      setGrades({});
+                      setTranscript([]);
+                      setRecordingSegments([]);
+                      completedRecordingsRef.current = [];
+                      setUploadComplete(false);
+                      setAssignmentName('');
+                      setSessionId(null);
+                    }}
+                    className="w-full px-6 py-4 bg-blue-600 text-white font-semibold text-lg rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 shadow-lg"
+                  >
+                    <Icon name="plus-circle" className="w-6 h-6" />
+                    Start New Grading Session
+                  </button>
+                  
+                  <div className="flex gap-3">
+                    {transcript.length > 0 && (
+                      <button
+                        onClick={downloadTranscript}
+                        className="flex-1 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors flex items-center justify-center gap-2"
+                      >
+                        <Icon name="file-text" className="w-5 h-5" />
+                        Download Transcript
+                      </button>
+                    )}
+                    {recordingSegments.length > 0 && (
+                      <button
+                        onClick={downloadAllRecordings}
+                        className="flex-1 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors flex items-center justify-center gap-2"
+                      >
+                        <Icon name="download" className="w-5 h-5" />
+                        Download Recordings
+                      </button>
+                    )}
+                  </div>
+                  
+                  <button
+                    onClick={() => setShowSuccessModal(false)}
+                    className="w-full px-4 py-2 text-gray-600 hover:text-gray-800 transition-colors"
+                  >
+                    Close and stay on this page
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
