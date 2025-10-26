@@ -717,22 +717,18 @@ function GradingInterface() {
             return updated;
           });
           
-          // Delay student reordering slightly to avoid React conflicts
-          setTimeout(() => {
-            // Update student order - move all graded students to top in reverse order
-            setStudentOrder(prev => {
-              const remaining = prev.filter(id => !studentIdsToMove.includes(id));
-              // Add in reverse order so last one ends up first
-              const reordered = [...studentIdsToMove.reverse(), ...remaining];
-              console.log(`[Segment ${chunkNum}] Reordered students, moved to top:`, studentIdsToMove.map(id => students.find(s => s.id === id)?.name));
-              return reordered;
-            });
-            
-            // Set current student to the last one processed
-            if (matchedStudents.length > 0) {
-              setCurrentStudent(matchedStudents[matchedStudents.length - 1]);
-            }
-          }, 50);
+          // Update student order - move all graded students to top in reverse order
+          setStudentOrder(prev => {
+            const remaining = prev.filter(id => !studentIdsToMove.includes(id));
+            const reordered = [...studentIdsToMove.reverse(), ...remaining];
+            console.log(`[Segment ${chunkNum}] Reordered students, moved to top:`, studentIdsToMove.map(id => students.find(s => s.id === id)?.name));
+            return reordered;
+          });
+          
+          // Set current student to the last one processed
+          if (matchedStudents.length > 0) {
+            setCurrentStudent(matchedStudents[matchedStudents.length - 1]);
+          }
         }
         
         // Update transcript with all students from this segment
@@ -1057,7 +1053,16 @@ function GradingInterface() {
 
       // Mark upload as complete - stay on review screen
       setUploadComplete(true);
-      console.log('Upload complete! Grades saved to Airtable.');
+      setIsUploading(false);
+      console.log('✅ Upload complete! Grades saved to Airtable.');
+      console.log('uploadComplete state set to TRUE');
+      console.log('Current step:', step);
+      
+      // Force a re-render
+      setTimeout(() => {
+        console.log('Checking if upload badge is visible...');
+        console.log('uploadComplete should be:', true);
+      }, 100);
       
     } catch (err) {
       console.error('Upload error:', err);
@@ -1583,6 +1588,8 @@ function GradingInterface() {
   if (step === 'review') {
     const completedCount = Object.values(grades).filter(g => g.completed).length;
     const maxTotal = calculateMaxTotal();
+    
+    console.log('🎬 RENDERING REVIEW SCREEN - uploadComplete:', uploadComplete, 'isUploading:', isUploading);
     
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
