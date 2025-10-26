@@ -57,17 +57,39 @@ const CONFIG = {
 const Icon = ({ name, className = "w-5 h-5" }) => {
   const ref = React.useRef(null);
   React.useEffect(() => {
-    const luc = window.lucide;
-    if (!luc || !luc.icons || !luc.icons[name]) {
-      if (ref.current) ref.current.innerHTML = ""; // no icon found
-      return;
+    // Wait for Lucide to be available
+    const renderIcon = () => {
+      const luc = window.lucide;
+      if (!luc || !luc.icons || !luc.icons[name]) {
+        if (ref.current) ref.current.innerHTML = ""; // no icon found
+        return;
+      }
+      // Render the SVG string under React's control
+      try {
+        const svg = luc.icons[name].toSvg({ class: className });
+        if (ref.current) ref.current.innerHTML = svg;
+      } catch (err) {
+        console.error('Error rendering icon:', name, err);
+      }
+    };
+
+    // If Lucide is already loaded, render immediately
+    if (window.lucide && window.lucide.icons) {
+      renderIcon();
+    } else {
+      // Otherwise wait for it to load
+      const checkInterval = setInterval(() => {
+        if (window.lucide && window.lucide.icons) {
+          clearInterval(checkInterval);
+          renderIcon();
+        }
+      }, 50);
+      
+      return () => clearInterval(checkInterval);
     }
-    // Render the SVG string *once per render* under React's control
-    const svg = luc.icons[name].toSvg({ class: className });
-    if (ref.current) ref.current.innerHTML = svg;
   }, [name, className]);
 
-  return React.createElement('span', { 'aria-hidden': true, ref });
+  return React.createElement('span', { 'aria-hidden': true, ref, style: { display: 'inline-block' } });
 };
 
 const blobToBase64 = (blob) =>
