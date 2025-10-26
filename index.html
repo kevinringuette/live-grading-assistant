@@ -701,7 +701,7 @@ function GradingInterface() {
           console.log(`[Segment ${chunkNum}] Students to update:`, matchedStudents);
           console.log(`[Segment ${chunkNum}] Grade data:`, gradeUpdates);
           
-          // Update grades - single batch
+          // Update grades only - NO reordering to avoid React conflicts
           setGrades(prev => {
             const updated = { ...prev };
             Object.entries(gradeUpdates).forEach(([studentId, gradeData]) => {
@@ -715,14 +715,6 @@ function GradingInterface() {
             });
             console.log(`[Segment ${chunkNum}] Updated grades state:`, Object.keys(updated).length, 'students');
             return updated;
-          });
-          
-          // Update student order - move all graded students to top in reverse order
-          setStudentOrder(prev => {
-            const remaining = prev.filter(id => !studentIdsToMove.includes(id));
-            const reordered = [...studentIdsToMove.reverse(), ...remaining];
-            console.log(`[Segment ${chunkNum}] Reordered students, moved to top:`, studentIdsToMove.map(id => students.find(s => s.id === id)?.name));
-            return reordered;
           });
           
           // Set current student to the last one processed
