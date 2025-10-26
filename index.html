@@ -55,8 +55,19 @@ const CONFIG = {
 };
 
 const Icon = ({ name, className = "w-5 h-5" }) => {
-  useEffect(() => { lucide.createIcons(); }, []);
-  return React.createElement('i', { 'data-lucide': name, className });
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    const luc = window.lucide;
+    if (!luc || !luc.icons || !luc.icons[name]) {
+      if (ref.current) ref.current.innerHTML = ""; // no icon found
+      return;
+    }
+    // Render the SVG string *once per render* under React's control
+    const svg = luc.icons[name].toSvg({ class: className });
+    if (ref.current) ref.current.innerHTML = svg;
+  }, [name, className]);
+
+  return React.createElement('span', { 'aria-hidden': true, ref });
 };
 
 const blobToBase64 = (blob) =>
@@ -717,15 +728,7 @@ function GradingInterface() {
             return updated;
           });
           
-          // Update student order - move all graded students to top in reverse order
-          setStudentOrder(prev => {
-            const remaining = prev.filter(id => !studentIdsToMove.includes(id));
-            const reordered = [...studentIdsToMove.reverse(), ...remaining];
-            console.log(`[Segment ${chunkNum}] Reordered students, moved to top:`, studentIdsToMove.map(id => students.find(s => s.id === id)?.name));
-            return reordered;
-          });
-          
-          // Set current student to the last one processed
+          // Set current student to the last one processed (NO reordering to avoid React conflicts)
           if (matchedStudents.length > 0) {
             setCurrentStudent(matchedStudents[matchedStudents.length - 1]);
           }
@@ -1053,8 +1056,7 @@ function GradingInterface() {
 
       // Mark upload as complete - stay on review screen
       setUploadComplete(true);
-      setIsUploading(false);
-      console.log('✅ Upload complete! Grades saved to Airtable.');
+      console.log('Upload complete! Grades saved to Airtable.');
       
     } catch (err) {
       console.error('Upload error:', err);
@@ -1581,8 +1583,6 @@ function GradingInterface() {
     const completedCount = Object.values(grades).filter(g => g.completed).length;
     const maxTotal = calculateMaxTotal();
     
-    console.log('🎬 RENDERING REVIEW SCREEN - uploadComplete:', uploadComplete, 'isUploading:', isUploading);
-    
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
         <div className="max-w-7xl mx-auto">
@@ -1609,8 +1609,7 @@ function GradingInterface() {
                   <div className="flex items-center gap-3">
                     <button
                       onClick={() => setStep('grading')}
-                      disabled={isUploading}
-                      className="px-4 py-2 bg-gray-600 text-white font-semibold rounded-lg hover:bg-gray-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+                      className="px-4 py-2 bg-gray-600 text-white font-semibold rounded-lg hover:bg-gray-700 transition-colors"
                     >
                       Back to Grading
                     </button>
@@ -2077,8 +2076,7 @@ function GradingInterface() {
   );
 }
 
-const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<GradingInterface />);
+ReactDOM.render(<GradingInterface />, document.getElementById('root'));
 </script>
 </body>
 </html>
