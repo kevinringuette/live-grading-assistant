@@ -55,19 +55,8 @@ const CONFIG = {
 };
 
 const Icon = ({ name, className = "w-5 h-5" }) => {
-  const ref = React.useRef(null);
-  React.useEffect(() => {
-    const luc = window.lucide;
-    if (!luc || !luc.icons || !luc.icons[name]) {
-      if (ref.current) ref.current.innerHTML = ""; // no icon found
-      return;
-    }
-    // Render the SVG string *once per render* under React's control
-    const svg = luc.icons[name].toSvg({ class: className });
-    if (ref.current) ref.current.innerHTML = svg;
-  }, [name, className]);
-
-  return React.createElement('span', { 'aria-hidden': true, ref });
+  useEffect(() => { lucide.createIcons(); }, []);
+  return React.createElement('i', { 'data-lucide': name, className });
 };
 
 const blobToBase64 = (blob) =>
@@ -712,7 +701,7 @@ function GradingInterface() {
           console.log(`[Segment ${chunkNum}] Students to update:`, matchedStudents);
           console.log(`[Segment ${chunkNum}] Grade data:`, gradeUpdates);
           
-          // Update grades only - NO reordering to avoid React conflicts
+          // Update grades - single batch
           setGrades(prev => {
             const updated = { ...prev };
             Object.entries(gradeUpdates).forEach(([studentId, gradeData]) => {
@@ -726,6 +715,14 @@ function GradingInterface() {
             });
             console.log(`[Segment ${chunkNum}] Updated grades state:`, Object.keys(updated).length, 'students');
             return updated;
+          });
+          
+          // Update student order - move all graded students to top in reverse order
+          setStudentOrder(prev => {
+            const remaining = prev.filter(id => !studentIdsToMove.includes(id));
+            const reordered = [...studentIdsToMove.reverse(), ...remaining];
+            console.log(`[Segment ${chunkNum}] Reordered students, moved to top:`, studentIdsToMove.map(id => students.find(s => s.id === id)?.name));
+            return reordered;
           });
           
           // Set current student to the last one processed
