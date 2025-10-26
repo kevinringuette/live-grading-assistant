@@ -955,6 +955,8 @@ function GradingInterface() {
     setUploadProgress({ current: 0, total: completedGrades.length });
     setError(null);
 
+    let gradesSaved = false;
+    
     try {
       const gradeRecordsToCreate = completedGrades.map(([studentId, gradeData]) => {
         const student = students.find(s => s.id === studentId);
@@ -972,28 +974,44 @@ function GradingInterface() {
       });
 
       const gradeChunks = chunk(gradeRecordsToCreate, 10);
-      const createdGradeRecords = [];
+      const createdPairs = []; // { gradeRecordId, studentId, gradeData }
 
+      // Create grade records with safe per-chunk mapping
       for (let i = 0; i < gradeChunks.length; i++) {
+        const start = i * 10;
+        const thisChunkCompleted = completedGrades.slice(start, start + gradeChunks[i].length);
+        
         const response = await airtableRequest(CONFIG.TABLES.GRADES, {
           method: 'POST',
           body: JSON.stringify({ records: gradeChunks[i] })
         });
-        createdGradeRecords.push(...response.records);
-        setUploadProgress({ current: Math.min((i + 1) * 10, completedGrades.length), total: completedGrades.length });
+        
+        // Map response records 1:1 with this chunk's completed grades
+        response.records.forEach((rec, j) => {
+          const [studentId, gradeData] = thisChunkCompleted[j] || [];
+          if (studentId && gradeData) {
+            createdPairs.push({ gradeRecordId: rec.id, studentId, gradeData });
+          }
+        });
+        
+        setUploadProgress({ 
+          current: Math.min((i + 1) * 10, completedGrades.length), 
+          total: completedGrades.length 
+        });
       }
 
+      gradesSaved = true;
+      console.log(`Successfully created ${createdPairs.length} grade records`);
+
+      // Build score rows from createdPairs
       const scoreRecordsToCreate = [];
-      
-      createdGradeRecords.forEach((gradeRecord, idx) => {
-        const [studentId, gradeData] = completedGrades[idx];
-        
+      createdPairs.forEach(({ gradeRecordId, gradeData }) => {
         rubricItems.forEach(item => {
           const score = gradeData.scores[item.name];
           if (score !== undefined && score !== null && score !== '') {
             scoreRecordsToCreate.push({
               fields: {
-                [CONFIG.FIELDS.GRADE_SCORES.GRADE]: [gradeRecord.id],
+                [CONFIG.FIELDS.GRADE_SCORES.GRADE]: [gradeRecordId],
                 [CONFIG.FIELDS.GRADE_SCORES.LABEL]: item.name,
                 [CONFIG.FIELDS.GRADE_SCORES.SCORE]: score,
                 [CONFIG.FIELDS.GRADE_SCORES.MAX]: item.maxPoints
@@ -1003,27 +1021,28 @@ function GradingInterface() {
         });
       });
 
+      // Try to create score rows, but don't block results on error
       if (scoreRecordsToCreate.length > 0) {
-        const scoreChunks = chunk(scoreRecordsToCreate, 10);
-        for (let i = 0; i < scoreChunks.length; i++) {
-          await airtableRequest(CONFIG.TABLES.GRADE_SCORES, {
-            method: 'POST',
-            body: JSON.stringify({ records: scoreChunks[i] })
-          });
+        try {
+          const scoreChunks = chunk(scoreRecordsToCreate, 10);
+          for (let i = 0; i < scoreChunks.length; i++) {
+            await airtableRequest(CONFIG.TABLES.GRADE_SCORES, {
+              method: 'POST',
+              body: JSON.stringify({ records: scoreChunks[i] })
+            });
+          }
+          console.log(`Successfully created ${scoreRecordsToCreate.length} score records`);
+        } catch (scoreErr) {
+          console.error('Error creating score records:', scoreErr);
+          setError(`Grades saved, but some score details failed: ${scoreErr.message}`);
         }
       }
 
+      // Always show results screen if grades were saved
       setUploadComplete(true);
-      console.log('Upload complete, setting step to results');
-      
-      // Force complete re-render by updating multiple states
-      setTimeout(() => {
-        setStep('results');
-        setIsUploading(false);
-        setError(null);
-        console.log('Step set to: results');
-        alert('Upload successful! You should now see the results screen.');
-      }, 100);
+      setStep('results');
+      setError(null);
+      console.log('Upload complete, navigating to results screen');
       
     } catch (err) {
       console.error('Upload error:', err);
@@ -1031,6 +1050,12 @@ function GradingInterface() {
       alert(`Upload failed: ${err.message}`);
     } finally {
       setIsUploading(false);
+      
+      // Fallback: if grades were saved but we're not on results screen, go there anyway
+      if (gradesSaved && step !== 'results') {
+        console.log('Fallback: forcing navigation to results screen');
+        setStep('results');
+      }
     }
   };
 
@@ -1045,9 +1070,6 @@ function GradingInterface() {
     );
   }
 
-  console.log('Current step value:', step, 'Type:', typeof step);
-  console.log('Checking steps...');
-  
   if (step === 'teacher-select') {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-8">
@@ -1761,10 +1783,8 @@ function GradingInterface() {
   }
 
   if (step === 'results') {
-    console.log('RENDERING RESULTS SCREEN');
     const completedCount = Object.values(grades).filter(g => g.completed).length;
     const maxTotal = calculateMaxTotal();
-    console.log('Results screen data:', { completedCount, maxTotal, studentsLength: students.length });
     
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
