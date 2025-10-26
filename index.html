@@ -118,7 +118,6 @@ function GradingInterface() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
   const [uploadComplete, setUploadComplete] = useState(false);
-  const [showSuccessModal, setShowSuccessModal] = useState(false);
 
   const [sortField, setSortField] = useState('name');
   const [sortDirection, setSortDirection] = useState('asc');
@@ -1056,10 +1055,9 @@ function GradingInterface() {
         }
       }
 
-      // Always show success modal if grades were saved
+      // Mark upload as complete - stay on review screen
       setUploadComplete(true);
-      setShowSuccessModal(true);
-      console.log('Upload complete, showing success modal');
+      console.log('Upload complete! Grades saved to Airtable.');
       
     } catch (err) {
       console.error('Upload error:', err);
@@ -1067,12 +1065,6 @@ function GradingInterface() {
       alert(`Upload failed: ${err.message}`);
     } finally {
       setIsUploading(false);
-      
-      // Fallback: if grades were saved but modal not shown, show it
-      if (gradesSaved && !showSuccessModal) {
-        console.log('Fallback: forcing success modal to show');
-        setShowSuccessModal(true);
-      }
     }
   };
 
@@ -1605,36 +1597,82 @@ function GradingInterface() {
                 </p>
               </div>
               <div className="flex flex-col items-end gap-3">
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={() => setStep('grading')}
-                    className="px-4 py-2 bg-gray-600 text-white font-semibold rounded-lg hover:bg-gray-700 transition-colors"
-                  >
-                    Back to Grading
-                  </button>
-                  <button
-                    onClick={uploadGradesToAirtable}
-                    disabled={isUploading || completedCount === 0}
-                    className="px-6 py-3 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
-                  >
-                    {isUploading ? (
-                      <>
-                        <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
-                        Uploading {uploadProgress.current}/{uploadProgress.total}
-                      </>
-                    ) : (
-                      <>
-                        <Icon name="upload" className="w-5 h-5" />
-                        Upload to Airtable
-                      </>
-                    )}
-                  </button>
-                </div>
+                {/* Upload Status Section */}
+                {uploadComplete ? (
+                  <div className="flex items-center gap-3 bg-green-50 border border-green-300 rounded-lg px-6 py-4">
+                    <Icon name="check-circle" className="w-8 h-8 text-green-600" />
+                    <div>
+                      <p className="text-lg font-bold text-green-800">Upload Complete!</p>
+                      <p className="text-sm text-green-700">Grades saved to Airtable</p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => setStep('grading')}
+                      className="px-4 py-2 bg-gray-600 text-white font-semibold rounded-lg hover:bg-gray-700 transition-colors"
+                    >
+                      Back to Grading
+                    </button>
+                    <button
+                      onClick={uploadGradesToAirtable}
+                      disabled={isUploading || completedCount === 0}
+                      className="px-6 py-3 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+                    >
+                      {isUploading ? (
+                        <>
+                          <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                          Uploading {uploadProgress.current}/{uploadProgress.total}
+                        </>
+                      ) : (
+                        <>
+                          <Icon name="upload" className="w-5 h-5" />
+                          Upload to Airtable
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+                
+                {/* Action Buttons Row */}
                 <div className="flex items-center gap-2">
+                  {uploadComplete && (
+                    <button
+                      onClick={() => {
+                        // Clear everything and start fresh
+                        if (confirm('Start a new grading session? This will clear all current data.')) {
+                          setStep('teacher-select');
+                          setSelectedTeacher(null);
+                          setSelectedSection(null);
+                          setStudents([]);
+                          setStudentOrder([]);
+                          setGrades({});
+                          setTranscript([]);
+                          setRecordingSegments([]);
+                          completedRecordingsRef.current = [];
+                          setUploadComplete(false);
+                          setAssignmentName('');
+                          setSessionId(null);
+                          setRubricItems([
+                            { name: 'Correctness', maxPoints: 25 },
+                            { name: 'Method', maxPoints: 25 },
+                            { name: 'Clarity', maxPoints: 25 },
+                            { name: 'Completeness', maxPoints: 25 }
+                          ]);
+                          setCurrentStudent(null);
+                          setError(null);
+                        }
+                      }}
+                      className="px-6 py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2 shadow-lg"
+                    >
+                      <Icon name="plus-circle" className="w-5 h-5" />
+                      Start New Session
+                    </button>
+                  )}
                   {transcript.length > 0 && (
                     <button
                       onClick={downloadTranscript}
-                      className="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200 transition-colors flex items-center gap-1"
+                      className="px-3 py-2 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200 transition-colors flex items-center gap-1"
                     >
                       <Icon name="file-text" className="w-4 h-4" />
                       Download Transcript
@@ -1643,7 +1681,7 @@ function GradingInterface() {
                   {recordingSegments.length > 0 && (
                     <button
                       onClick={downloadAllRecordings}
-                      className="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200 transition-colors flex items-center gap-1"
+                      className="px-3 py-2 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200 transition-colors flex items-center gap-1"
                     >
                       <Icon name="download" className="w-4 h-4" />
                       Download Recordings
@@ -1796,86 +1834,6 @@ function GradingInterface() {
           </div>
         </div>
 
-        {/* Success Modal Overlay */}
-        {showSuccessModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-6">
-            <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-8 animate-fadeIn">
-              <div className="text-center">
-                {/* Big Green Checkmark */}
-                <div className="w-20 h-20 rounded-full bg-green-100 flex items-center justify-center mx-auto mb-6">
-                  <Icon name="check-circle" className="w-12 h-12 text-green-600" />
-                </div>
-                
-                {/* Success Message */}
-                <h1 className="text-4xl font-bold text-gray-900 mb-3">Upload Complete!</h1>
-                <p className="text-xl text-green-600 font-semibold mb-4">
-                  Grades successfully saved to Airtable
-                </p>
-                
-                {/* Session Details */}
-                <div className="bg-gray-50 rounded-lg p-4 mb-6">
-                  <p className="text-lg text-gray-700 font-medium">{assignmentName}</p>
-                  <p className="text-gray-600">{selectedTeacher?.name} • {selectedSection?.name}</p>
-                  <p className="text-sm text-gray-500 mt-2">
-                    {Object.values(grades).filter(g => g.completed).length} of {students.length} students graded • Max Points: {calculateMaxTotal()}
-                  </p>
-                </div>
-
-                {/* Action Buttons */}
-                <div className="flex flex-col gap-3">
-                  <button
-                    onClick={() => {
-                      setShowSuccessModal(false);
-                      setStep('teacher-select');
-                      setSelectedTeacher(null);
-                      setSelectedSection(null);
-                      setStudents([]);
-                      setGrades({});
-                      setTranscript([]);
-                      setRecordingSegments([]);
-                      completedRecordingsRef.current = [];
-                      setUploadComplete(false);
-                      setAssignmentName('');
-                      setSessionId(null);
-                    }}
-                    className="w-full px-6 py-4 bg-blue-600 text-white font-semibold text-lg rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 shadow-lg"
-                  >
-                    <Icon name="plus-circle" className="w-6 h-6" />
-                    Start New Grading Session
-                  </button>
-                  
-                  <div className="flex gap-3">
-                    {transcript.length > 0 && (
-                      <button
-                        onClick={downloadTranscript}
-                        className="flex-1 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors flex items-center justify-center gap-2"
-                      >
-                        <Icon name="file-text" className="w-5 h-5" />
-                        Download Transcript
-                      </button>
-                    )}
-                    {recordingSegments.length > 0 && (
-                      <button
-                        onClick={downloadAllRecordings}
-                        className="flex-1 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors flex items-center justify-center gap-2"
-                      >
-                        <Icon name="download" className="w-5 h-5" />
-                        Download Recordings
-                      </button>
-                    )}
-                  </div>
-                  
-                  <button
-                    onClick={() => setShowSuccessModal(false)}
-                    className="w-full px-4 py-2 text-gray-600 hover:text-gray-800 transition-colors"
-                  >
-                    Close and stay on this page
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
     );
   }
