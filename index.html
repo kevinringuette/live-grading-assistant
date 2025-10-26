@@ -1055,14 +1055,6 @@ function GradingInterface() {
       setUploadComplete(true);
       setIsUploading(false);
       console.log('✅ Upload complete! Grades saved to Airtable.');
-      console.log('uploadComplete state set to TRUE');
-      console.log('Current step:', step);
-      
-      // Force a re-render
-      setTimeout(() => {
-        console.log('Checking if upload badge is visible...');
-        console.log('uploadComplete should be:', true);
-      }, 100);
       
     } catch (err) {
       console.error('Upload error:', err);
@@ -1617,7 +1609,8 @@ function GradingInterface() {
                   <div className="flex items-center gap-3">
                     <button
                       onClick={() => setStep('grading')}
-                      className="px-4 py-2 bg-gray-600 text-white font-semibold rounded-lg hover:bg-gray-700 transition-colors"
+                      disabled={isUploading}
+                      className="px-4 py-2 bg-gray-600 text-white font-semibold rounded-lg hover:bg-gray-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
                     >
                       Back to Grading
                     </button>
@@ -2084,7 +2077,8 @@ function GradingInterface() {
   );
 }
 
-ReactDOM.render(<GradingInterface />, document.getElementById('root'));
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<GradingInterface />);
 </script>
 </body>
 </html>
