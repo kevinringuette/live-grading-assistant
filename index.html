@@ -44,13 +44,15 @@ const CONFIG = {
     STUDENTS: 'Student Roster',
     GRADES: 'Grades',
     GRADE_SCORES: 'Grade Scores',
+    RUBRICS: 'Rubrics',
   },
   FIELDS: {
     TEACHERS: { NAME: 'Name', EMAIL: 'Email', FIRST_NAME: 'First Name', LAST_NAME: 'Last Name', SECTIONS: 'Master Sections' },
     SECTIONS: { NAME: 'Section Name', SECTION_ID: 'Section ID', TEACHER_LINK: 'Teacher Link', STUDENT_ROSTER: 'Student Roster' },
     STUDENTS: { NAME: 'Name', EMAIL: 'Email', ID: 'ID', SECTIONS: 'Master Sections' },
     GRADES: { ASSIGNMENT: 'Assignment', STUDENT: 'Student', COMMENTS: 'Comments', FINAL_GRADE: 'Final Grade', SECTION: 'Section' },
-    GRADE_SCORES: { GRADE: 'Grade', LABEL: 'Label', SCORE: 'Score', MAX: 'Max Points' }
+    GRADE_SCORES: { GRADE: 'Grade', LABEL: 'Label', SCORE: 'Score', MAX: 'Max Points' },
+    RUBRICS: { NAME: 'Rubric Name', TEACHER: 'Teacher', ITEMS: 'Items' }
   }
 };
 
@@ -122,11 +124,12 @@ function GradingInterface() {
 
   const [sections, setSections] = useState([]);
   const [sectionQuery, setSectionQuery] = useState('');
-  const [selectedSection, setSelectedSection] = useState(null);
+  const [selectedSections, setSelectedSections] = useState([]);
 
   const [students, setStudents] = useState([]);
   const [studentOrder, setStudentOrder] = useState([]);
   const [assignmentName, setAssignmentName] = useState('');
+  const [savedRubrics, setSavedRubrics] = useState([]);
   const [rubricItems, setRubricItems] = useState([
     { name: 'Correctness', maxPoints: 25 },
     { name: 'Method', maxPoints: 25 },
@@ -190,7 +193,7 @@ function GradingInterface() {
     };
     window.addEventListener('keydown', handleKeyPress);
     return () => window.removeEventListener('keydown', handleKeyPress);
-  }, [isRecording, isPaused, editingStudent, rubricItems, students, grades, selectedTeacher, selectedSection, assignmentName, sessionId]);
+  }, [isRecording, isPaused, editingStudent, rubricItems, students, grades, selectedTeacher, selectedSections, assignmentName, sessionId]);
 
   const airtableRequest = async (endpoint, options = {}) => {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${endpoint}`;
@@ -258,29 +261,64 @@ function GradingInterface() {
     }
   };
 
-  const selectSection = async (section) => {
-    setSelectedSection(section);
+  const toggleSection = (section) => {
+    setSelectedSections(prev => {
+      const isSelected = prev.find(s => s.id === section.id);
+      if (isSelected) {
+        return prev.filter(s => s.id !== section.id);
+      } else {
+        return [...prev, section];
+      }
+    });
+  };
+
+  const proceedWithSections = async () => {
+    if (selectedSections.length === 0) {
+      alert('Please select at least one section.');
+      return;
+    }
+    
     setLoading(true);
     setStep('assignment-setup');
     setError(null);
+    
     try {
-      const sectionData = await airtableRequest(`${CONFIG.TABLES.SECTIONS}/${section.id}`);
-      const studentIds = sectionData.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER] || [];
-      const studentsPromises = studentIds.map(id => airtableRequest(`${CONFIG.TABLES.STUDENTS}/${id}`));
-      const studentsData = await Promise.all(studentsPromises);
-      const studentsList = studentsData.map(data => ({
-        id: data.id,
-        name: data.fields[CONFIG.FIELDS.STUDENTS.NAME],
-        email: data.fields[CONFIG.FIELDS.STUDENTS.EMAIL],
-        studentId: data.fields[CONFIG.FIELDS.STUDENTS.ID]?.toString() || 'N/A'
-      }));
-      setStudents(studentsList);
-      setStudentOrder(studentsList.map(s => s.id));
+      // Load students from all selected sections
+      const allStudents = [];
+      const studentIdsSeen = new Set();
+      
+      for (const section of selectedSections) {
+        const sectionData = await airtableRequest(`${CONFIG.TABLES.SECTIONS}/${section.id}`);
+        const studentIds = sectionData.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER] || [];
+        
+        for (const studentId of studentIds) {
+          if (!studentIdsSeen.has(studentId)) {
+            studentIdsSeen.add(studentId);
+            const studentData = await airtableRequest(`${CONFIG.TABLES.STUDENTS}/${studentId}`);
+            allStudents.push({
+              id: studentData.id,
+              name: studentData.fields[CONFIG.FIELDS.STUDENTS.NAME],
+              email: studentData.fields[CONFIG.FIELDS.STUDENTS.EMAIL],
+              studentId: studentData.fields[CONFIG.FIELDS.STUDENTS.ID]?.toString() || 'N/A',
+              sectionId: section.id,
+              sectionName: section.name
+            });
+          }
+        }
+      }
+      
+      setStudents(allStudents);
+      setStudentOrder(allStudents.map(s => s.id));
+      
       const initialGrades = {};
-      studentsList.forEach(student => {
+      allStudents.forEach(student => {
         initialGrades[student.id] = { scores: {}, comments: '', completed: false };
       });
       setGrades(initialGrades);
+      
+      // Load saved rubrics for this teacher
+      await loadSavedRubrics();
+      
     } catch (err) {
       console.error('Error loading students:', err);
       setError('Failed to load students.');
@@ -296,6 +334,58 @@ function GradingInterface() {
     }
     setSessionId(Date.now().toString());
     setStep('grading');
+  };
+
+  const loadSavedRubrics = async () => {
+    try {
+      const response = await airtableRequest(CONFIG.TABLES.RUBRICS);
+      const teacherRubrics = response.records
+        .filter(record => {
+          const teacherLinks = record.fields[CONFIG.FIELDS.RUBRICS.TEACHER];
+          return teacherLinks && teacherLinks.includes(selectedTeacher.id);
+        })
+        .map(record => ({
+          id: record.id,
+          name: record.fields[CONFIG.FIELDS.RUBRICS.NAME],
+          items: JSON.parse(record.fields[CONFIG.FIELDS.RUBRICS.ITEMS] || '[]')
+        }));
+      setSavedRubrics(teacherRubrics);
+    } catch (err) {
+      console.error('Error loading rubrics:', err);
+      // Don't show error to user - rubrics are optional
+    }
+  };
+
+  const saveCurrentRubric = async (rubricName) => {
+    if (!rubricName.trim()) {
+      alert('Please enter a rubric name.');
+      return;
+    }
+    
+    try {
+      const rubricData = {
+        fields: {
+          [CONFIG.FIELDS.RUBRICS.NAME]: rubricName,
+          [CONFIG.FIELDS.RUBRICS.TEACHER]: [selectedTeacher.id],
+          [CONFIG.FIELDS.RUBRICS.ITEMS]: JSON.stringify(rubricItems)
+        }
+      };
+      
+      await airtableRequest(CONFIG.TABLES.RUBRICS, {
+        method: 'POST',
+        body: JSON.stringify({ records: [rubricData] })
+      });
+      
+      alert(`Rubric "${rubricName}" saved successfully!`);
+      await loadSavedRubrics(); // Reload rubrics list
+    } catch (err) {
+      console.error('Error saving rubric:', err);
+      alert(`Failed to save rubric: ${err.message}`);
+    }
+  };
+
+  const loadRubric = (rubric) => {
+    setRubricItems(rubric.items);
   };
 
   // NEW: Start recording (creates first segment)
@@ -438,7 +528,7 @@ function GradingInterface() {
     // Build transcript text with formatting
     let transcriptText = `${assignmentName} - Grading Transcript\n`;
     transcriptText += `Teacher: ${selectedTeacher?.name}\n`;
-    transcriptText += `Section: ${selectedSection?.name}\n`;
+    transcriptText += `Sections: ${selectedSections.map(s => s.name).join(', ')}\n`;
     transcriptText += `Date: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}\n`;
     transcriptText += `\n${'='.repeat(60)}\n\n`;
 
@@ -606,8 +696,7 @@ function GradingInterface() {
           teacherName: selectedTeacher?.name || '',
           teacherEmail: selectedTeacher?.email || '',
           teacherId: selectedTeacher?.id || '',
-          sectionName: selectedSection?.name || '',
-          sectionId: selectedSection?.id || ''
+          sections: selectedSections.map(s => ({ name: s.name, id: s.id }))
         },
         rubric: rubricItems,
         roster
@@ -1023,7 +1112,7 @@ function GradingInterface() {
           fields: {
             [CONFIG.FIELDS.GRADES.ASSIGNMENT]: assignmentName,
             [CONFIG.FIELDS.GRADES.STUDENT]: [studentId],
-            [CONFIG.FIELDS.GRADES.SECTION]: [selectedSection.id],
+            [CONFIG.FIELDS.GRADES.SECTION]: [student.sectionId], // Use the student's section
             [CONFIG.FIELDS.GRADES.COMMENTS]: gradeData.comments || '',
             [CONFIG.FIELDS.GRADES.FINAL_GRADE]: total
           }
@@ -1163,12 +1252,17 @@ function GradingInterface() {
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-8">
         <div className="max-w-2xl mx-auto">
           <div className="bg-white rounded-lg shadow-lg p-8">
-            <button onClick={() => { setStep('teacher-select'); setSelectedTeacher(null); setSections([]); }} className="mb-4 text-blue-600 hover:text-blue-700 font-medium flex items-center gap-2">
-              <Icon name="arrow-left" className="w-4 h-4" />
+            <button onClick={() => { setStep('teacher-select'); setSelectedTeacher(null); setSections([]); setSelectedSections([]); }} className="mb-4 text-blue-600 hover:text-blue-700 font-medium flex items-center gap-2">
+              <Icon name="ArrowLeft" className="w-4 h-4" />
               Back to Teachers
             </button>
-            <h1 className="text-3xl font-bold text-gray-900 mb-2">Select Section</h1>
-            <p className="text-gray-600 mb-6">Teacher: {selectedTeacher?.name}</p>
+            <h1 className="text-3xl font-bold text-gray-900 mb-2">Select Sections</h1>
+            <p className="text-gray-600 mb-2">Teacher: {selectedTeacher?.name}</p>
+            <p className="text-sm text-blue-600 mb-6">
+              {selectedSections.length > 0 
+                ? `${selectedSections.length} section(s) selected` 
+                : 'Select one or more sections to grade'}
+            </p>
             {loading ? (
               <div className="text-center py-8">
                 <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
@@ -1185,18 +1279,43 @@ function GradingInterface() {
                     className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                   />
                 </div>
-                <div className="space-y-2 max-h-96 overflow-y-auto">
-                  {filteredSections.map(section => (
-                    <button
-                      key={section.id}
-                      onClick={() => selectSection(section)}
-                      className="w-full text-left p-4 border border-gray-200 rounded-lg hover:bg-blue-50 hover:border-blue-300 transition-colors"
-                    >
-                      <p className="font-semibold text-gray-900">{section.name}</p>
-                      <p className="text-sm text-gray-500">{section.studentCount} students</p>
-                    </button>
-                  ))}
+                <div className="space-y-2 max-h-96 overflow-y-auto mb-6">
+                  {filteredSections.map(section => {
+                    const isSelected = selectedSections.find(s => s.id === section.id);
+                    return (
+                      <button
+                        key={section.id}
+                        onClick={() => toggleSection(section)}
+                        className={`w-full text-left p-4 border-2 rounded-lg transition-all ${
+                          isSelected 
+                            ? 'border-blue-500 bg-blue-50' 
+                            : 'border-gray-200 hover:bg-blue-50 hover:border-blue-300'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="font-semibold text-gray-900">{section.name}</p>
+                            <p className="text-sm text-gray-500">{section.studentCount} students</p>
+                          </div>
+                          <div className={`w-6 h-6 rounded border-2 flex items-center justify-center ${
+                            isSelected ? 'bg-blue-600 border-blue-600' : 'border-gray-300'
+                          }`}>
+                            {isSelected && (
+                              <Icon name="Check" className="w-4 h-4 text-white" />
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
+                <button
+                  onClick={proceedWithSections}
+                  disabled={selectedSections.length === 0}
+                  className="w-full px-6 py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
+                >
+                  Continue with {selectedSections.length} Section{selectedSections.length !== 1 ? 's' : ''}
+                </button>
               </>
             )}
           </div>
@@ -1210,12 +1329,14 @@ function GradingInterface() {
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-8">
         <div className="max-w-4xl mx-auto">
           <div className="bg-white rounded-lg shadow-lg p-8">
-            <button onClick={() => { setStep('section-select'); setSelectedSection(null); setStudents([]); }} className="mb-4 text-blue-600 hover:text-blue-700 font-medium flex items-center gap-2">
-              <Icon name="arrow-left" className="w-4 h-4" />
+            <button onClick={() => { setStep('section-select'); setSelectedSections([]); setStudents([]); }} className="mb-4 text-blue-600 hover:text-blue-700 font-medium flex items-center gap-2">
+              <Icon name="ArrowLeft" className="w-4 h-4" />
               Back to Sections
             </button>
             <h1 className="text-3xl font-bold text-gray-900 mb-2">Assignment Setup</h1>
-            <p className="text-gray-600 mb-6">Section: {selectedSection?.name} ({students.length} students)</p>
+            <p className="text-gray-600 mb-6">
+              Sections: {selectedSections.map(s => s.name).join(', ')} ({students.length} students)
+            </p>
             
             <div className="mb-6">
               <label className="block text-sm font-medium text-gray-700 mb-2">Assignment Name</label>
@@ -1228,13 +1349,43 @@ function GradingInterface() {
               />
             </div>
 
+            {savedRubrics.length > 0 && (
+              <div className="mb-6">
+                <label className="block text-sm font-medium text-gray-700 mb-2">Load Saved Rubric</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {savedRubrics.map(rubric => (
+                    <button
+                      key={rubric.id}
+                      onClick={() => loadRubric(rubric)}
+                      className="px-4 py-2 border-2 border-gray-300 rounded-lg hover:border-blue-500 hover:bg-blue-50 text-left transition-colors"
+                    >
+                      <p className="font-medium text-gray-900">{rubric.name}</p>
+                      <p className="text-xs text-gray-500">{rubric.items.length} items</p>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="mb-6">
               <div className="flex justify-between items-center mb-4">
                 <label className="block text-sm font-medium text-gray-700">Rubric Items</label>
-                <button onClick={addRubricItem} className="px-3 py-1 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 flex items-center gap-1">
-                  <Icon name="plus" className="w-4 h-4" />
-                  Add Item
-                </button>
+                <div className="flex gap-2">
+                  <button 
+                    onClick={() => {
+                      const name = prompt('Enter a name for this rubric:');
+                      if (name) saveCurrentRubric(name);
+                    }}
+                    className="px-3 py-1 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700 flex items-center gap-1"
+                  >
+                    <Icon name="Save" className="w-4 h-4" />
+                    Save Rubric
+                  </button>
+                  <button onClick={addRubricItem} className="px-3 py-1 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 flex items-center gap-1">
+                    <Icon name="Plus" className="w-4 h-4" />
+                    Add Item
+                  </button>
+                </div>
               </div>
               <div className="space-y-3">
                 {rubricItems.map((item, idx) => (
@@ -1268,7 +1419,9 @@ function GradingInterface() {
             </div>
 
             <div className="mb-6">
-              <label className="block text-sm font-medium text-gray-700 mb-2">Students in Section</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Students in Selected Sections ({students.length} total)
+              </label>
               <div className="space-y-2 max-h-64 overflow-y-auto bg-gray-50 rounded-lg p-4">
                 {students.map((student, idx) => (
                   <div key={student.id} className="flex items-center gap-3 bg-white p-3 rounded-lg border border-gray-200">
@@ -1277,7 +1430,12 @@ function GradingInterface() {
                     </div>
                     <div className="flex-1">
                       <p className="font-medium text-gray-900">{student.name}</p>
-                      <p className="text-xs text-gray-500">ID: {student.studentId}</p>
+                      <p className="text-xs text-gray-500">
+                        ID: {student.studentId}
+                        {selectedSections.length > 1 && student.sectionName && (
+                          <span> • {student.sectionName}</span>
+                        )}
+                      </p>
                     </div>
                   </div>
                 ))}
@@ -1305,7 +1463,7 @@ function GradingInterface() {
             <div className="flex items-center justify-between">
               <div>
                 <h1 className="text-2xl font-bold text-gray-900">{assignmentName}</h1>
-                <p className="text-sm text-gray-600">{selectedTeacher?.name} • {selectedSection?.name}</p>
+                <p className="text-sm text-gray-600">{selectedTeacher?.name} • {selectedSections.map(s => s.name).join(', ')}</p>
               </div>
               <div className="flex items-center gap-4">
                 {pendingCount > 0 && (
@@ -1647,7 +1805,7 @@ function GradingInterface() {
             <div className="flex items-center justify-between">
               <div>
                 <h1 className="text-3xl font-bold text-gray-900">Review Grades - {assignmentName}</h1>
-                <p className="text-gray-600 mt-1">{selectedTeacher?.name} • {selectedSection?.name}</p>
+                <p className="text-gray-600 mt-1">{selectedTeacher?.name} • {selectedSections.map(s => s.name).join(', ')}</p>
                 <p className="text-sm text-gray-500 mt-1">
                   {completedCount} of {students.length} students graded • Max Points: {maxTotal}
                 </p>
@@ -1913,7 +2071,7 @@ function GradingInterface() {
                     <p className="text-green-600 font-semibold">Grades successfully saved to Airtable</p>
                   </div>
                 </div>
-                <p className="text-gray-600 mt-2">{assignmentName} • {selectedTeacher?.name} • {selectedSection?.name}</p>
+                <p className="text-gray-600 mt-2">{assignmentName} • {selectedTeacher?.name} • {selectedSections.map(s => s.name).join(', ')}</p>
                 <p className="text-sm text-gray-500 mt-1">
                   {completedCount} of {students.length} students graded • Max Points: {maxTotal}
                 </p>
@@ -2114,7 +2272,7 @@ function GradingInterface() {
             console.log('Resetting to teacher-select');
             setStep('teacher-select');
             setSelectedTeacher(null);
-            setSelectedSection(null);
+            setSelectedSections([]);
             setStudents([]);
             setGrades({});
             setTranscript([]);
