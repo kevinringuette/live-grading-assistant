@@ -914,7 +914,18 @@ function GradingInterface() {
             return updated;
           });
           
-          // Set current student to the last one processed (NO reordering to avoid React conflicts)
+          // Move graded students to the top of the list
+          if (studentIdsToMove.length > 0) {
+            setStudentOrder(prev => {
+              // Remove the graded students from their current positions
+              const remaining = prev.filter(id => !studentIdsToMove.includes(id));
+              // Add graded students to the top (in the order they were graded)
+              return [...studentIdsToMove, ...remaining];
+            });
+            console.log(`[Segment ${chunkNum}] Moved ${studentIdsToMove.length} student(s) to top of list`);
+          }
+          
+          // Set current student to the last one processed
           if (matchedStudents.length > 0) {
             setCurrentStudent(matchedStudents[matchedStudents.length - 1]);
           }
@@ -1033,6 +1044,11 @@ function GradingInterface() {
         updatedScores[item.name] !== null && 
         updatedScores[item.name] !== ''
       );
+      
+      // If this completes the grade, move student to top
+      if (allScoresFilled && !existingGrade.completed) {
+        setTimeout(() => bumpStudentDown(studentId), 0);
+      }
       
       return {
         ...prev,
@@ -1989,6 +2005,8 @@ function GradingInterface() {
                                   completed: true
                                 }
                               }));
+                              // Move student to top when marked complete
+                              bumpStudentDown(student.id);
                             }}
                             className="mt-3 w-full px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
                           >
