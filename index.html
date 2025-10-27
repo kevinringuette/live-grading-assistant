@@ -859,20 +859,39 @@ function GradingInterface() {
   };
 
   const updateScore = (studentId, rubricName, value) => {
-    setGrades(prev => ({
-      ...prev,
-      [studentId]: {
-        ...prev[studentId],
-        scores: { ...prev[studentId].scores, [rubricName]: value }
-      }
-    }));
+    setGrades(prev => {
+      const existingGrade = prev[studentId] || { scores: {}, comments: '', completed: false };
+      const updatedScores = { ...existingGrade.scores, [rubricName]: value };
+      
+      // Check if all rubric items have scores
+      const allScoresFilled = rubricItems.every(item => 
+        updatedScores[item.name] !== undefined && 
+        updatedScores[item.name] !== null && 
+        updatedScores[item.name] !== ''
+      );
+      
+      return {
+        ...prev,
+        [studentId]: {
+          ...existingGrade,
+          scores: updatedScores,
+          completed: allScoresFilled // Mark as completed if all scores are filled
+        }
+      };
+    });
   };
 
   const updateComments = (studentId, value) => {
-    setGrades(prev => ({
-      ...prev,
-      [studentId]: { ...prev[studentId], comments: value }
-    }));
+    setGrades(prev => {
+      const existingGrade = prev[studentId] || { scores: {}, comments: '', completed: false };
+      return {
+        ...prev,
+        [studentId]: { 
+          ...existingGrade, 
+          comments: value 
+        }
+      };
+    });
   };
 
   const calculateTotal = (studentGrade) => {
@@ -1588,6 +1607,22 @@ function GradingInterface() {
                             </p>
                           )}
                         </div>
+                        {!sg.completed && (
+                          <button
+                            onClick={() => {
+                              setGrades(prev => ({
+                                ...prev,
+                                [student.id]: {
+                                  ...prev[student.id],
+                                  completed: true
+                                }
+                              }));
+                            }}
+                            className="mt-3 w-full px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
+                          >
+                            Mark as Complete
+                          </button>
+                        )}
                       </div>
                     );
                   })}
