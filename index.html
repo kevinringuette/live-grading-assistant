@@ -130,6 +130,10 @@ function GradingInterface() {
   const [studentOrder, setStudentOrder] = useState([]);
   const [assignmentName, setAssignmentName] = useState('');
   const [savedRubrics, setSavedRubrics] = useState([]);
+  const [allRubrics, setAllRubrics] = useState([]);
+  const [showRubricBrowser, setShowRubricBrowser] = useState(false);
+  const [rubricFilterTeacher, setRubricFilterTeacher] = useState(null);
+  const [rubricSearchQuery, setRubricSearchQuery] = useState('');
   const [rubricItems, setRubricItems] = useState([
     { name: 'Correctness', maxPoints: 25 },
     { name: 'Method', maxPoints: 25 },
@@ -339,16 +343,39 @@ function GradingInterface() {
   const loadSavedRubrics = async () => {
     try {
       const response = await airtableRequest(CONFIG.TABLES.RUBRICS);
-      const teacherRubrics = response.records
-        .filter(record => {
-          const teacherLinks = record.fields[CONFIG.FIELDS.RUBRICS.TEACHER];
-          return teacherLinks && teacherLinks.includes(selectedTeacher.id);
+      
+      // Get all rubrics with teacher information
+      const allRubricsWithTeachers = await Promise.all(
+        response.records.map(async (record) => {
+          const teacherLinks = record.fields[CONFIG.FIELDS.RUBRICS.TEACHER] || [];
+          const teacherNames = [];
+          
+          // Fetch teacher names for each rubric
+          for (const teacherId of teacherLinks) {
+            try {
+              const teacherData = await airtableRequest(`${CONFIG.TABLES.TEACHERS}/${teacherId}`);
+              teacherNames.push(teacherData.fields[CONFIG.FIELDS.TEACHERS.NAME]);
+            } catch (err) {
+              console.error('Error loading teacher:', err);
+            }
+          }
+          
+          return {
+            id: record.id,
+            name: record.fields[CONFIG.FIELDS.RUBRICS.NAME],
+            items: JSON.parse(record.fields[CONFIG.FIELDS.RUBRICS.ITEMS] || '[]'),
+            teacherIds: teacherLinks,
+            teacherNames: teacherNames
+          };
         })
-        .map(record => ({
-          id: record.id,
-          name: record.fields[CONFIG.FIELDS.RUBRICS.NAME],
-          items: JSON.parse(record.fields[CONFIG.FIELDS.RUBRICS.ITEMS] || '[]')
-        }));
+      );
+      
+      setAllRubrics(allRubricsWithTeachers);
+      
+      // Filter for current teacher's rubrics
+      const teacherRubrics = allRubricsWithTeachers.filter(rubric => 
+        rubric.teacherIds.includes(selectedTeacher.id)
+      );
       setSavedRubrics(teacherRubrics);
     } catch (err) {
       console.error('Error loading rubrics:', err);
@@ -386,6 +413,54 @@ function GradingInterface() {
 
   const loadRubric = (rubric) => {
     setRubricItems(rubric.items);
+    setShowRubricBrowser(false);
+  };
+
+  const openRubricBrowser = () => {
+    setShowRubricBrowser(true);
+    setRubricFilterTeacher(selectedTeacher); // Default to current teacher
+    setRubricSearchQuery('');
+  };
+
+  const deleteRubric = async (rubricId, rubricName) => {
+    if (!confirm(`Are you sure you want to delete the rubric "${rubricName}"?`)) {
+      return;
+    }
+    
+    try {
+      await airtableRequest(`${CONFIG.TABLES.RUBRICS}/${rubricId}`, {
+        method: 'DELETE'
+      });
+      
+      alert(`Rubric "${rubricName}" deleted successfully!`);
+      await loadSavedRubrics(); // Reload rubrics list
+    } catch (err) {
+      console.error('Error deleting rubric:', err);
+      alert(`Failed to delete rubric: ${err.message}`);
+    }
+  };
+
+  // Filter rubrics based on selected teacher and search query
+  const getFilteredRubrics = () => {
+    let filtered = allRubrics;
+    
+    // Filter by teacher if selected
+    if (rubricFilterTeacher) {
+      filtered = filtered.filter(rubric => 
+        rubric.teacherIds.includes(rubricFilterTeacher.id)
+      );
+    }
+    
+    // Filter by search query
+    if (rubricSearchQuery.trim()) {
+      const query = rubricSearchQuery.toLowerCase();
+      filtered = filtered.filter(rubric =>
+        rubric.name.toLowerCase().includes(query) ||
+        rubric.teacherNames.some(name => name.toLowerCase().includes(query))
+      );
+    }
+    
+    return filtered;
   };
 
   // NEW: Start recording (creates first segment)
@@ -1349,28 +1424,17 @@ function GradingInterface() {
               />
             </div>
 
-            {savedRubrics.length > 0 && (
-              <div className="mb-6">
-                <label className="block text-sm font-medium text-gray-700 mb-2">Load Saved Rubric</label>
-                <div className="grid grid-cols-2 gap-2">
-                  {savedRubrics.map(rubric => (
-                    <button
-                      key={rubric.id}
-                      onClick={() => loadRubric(rubric)}
-                      className="px-4 py-2 border-2 border-gray-300 rounded-lg hover:border-blue-500 hover:bg-blue-50 text-left transition-colors"
-                    >
-                      <p className="font-medium text-gray-900">{rubric.name}</p>
-                      <p className="text-xs text-gray-500">{rubric.items.length} items</p>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
             <div className="mb-6">
               <div className="flex justify-between items-center mb-4">
                 <label className="block text-sm font-medium text-gray-700">Rubric Items</label>
                 <div className="flex gap-2">
+                  <button 
+                    onClick={openRubricBrowser}
+                    className="px-3 py-1 bg-purple-600 text-white text-sm rounded-lg hover:bg-purple-700 flex items-center gap-1"
+                  >
+                    <Icon name="FolderOpen" className="w-4 h-4" />
+                    Browse Rubrics
+                  </button>
                   <button 
                     onClick={() => {
                       const name = prompt('Enter a name for this rubric:');
@@ -1451,6 +1515,156 @@ function GradingInterface() {
             </button>
           </div>
         </div>
+
+        {/* Rubric Browser Modal */}
+        {showRubricBrowser && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-lg shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+              {/* Modal Header */}
+              <div className="bg-gradient-to-r from-purple-600 to-blue-600 p-6 text-white">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-2xl font-bold">Browse Rubrics</h2>
+                  <button
+                    onClick={() => setShowRubricBrowser(false)}
+                    className="p-2 hover:bg-white hover:bg-opacity-20 rounded-lg transition-colors"
+                  >
+                    <Icon name="X" className="w-6 h-6" />
+                  </button>
+                </div>
+                
+                {/* Search and Filter */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <input
+                    type="text"
+                    placeholder="Search rubrics by name..."
+                    value={rubricSearchQuery}
+                    onChange={(e) => setRubricSearchQuery(e.target.value)}
+                    className="px-4 py-2 rounded-lg text-gray-900 focus:ring-2 focus:ring-white focus:outline-none"
+                  />
+                  <select
+                    value={rubricFilterTeacher?.id || ''}
+                    onChange={(e) => {
+                      if (e.target.value === '') {
+                        setRubricFilterTeacher(null);
+                      } else {
+                        const teacher = teachers.find(t => t.id === e.target.value);
+                        setRubricFilterTeacher(teacher);
+                      }
+                    }}
+                    className="px-4 py-2 rounded-lg text-gray-900 focus:ring-2 focus:ring-white focus:outline-none"
+                  >
+                    <option value="">All Teachers</option>
+                    <option value={selectedTeacher.id}>My Rubrics ({selectedTeacher.name})</option>
+                    {teachers.filter(t => t.id !== selectedTeacher.id).map(teacher => (
+                      <option key={teacher.id} value={teacher.id}>
+                        {teacher.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Modal Body */}
+              <div className="flex-1 overflow-y-auto p-6">
+                {getFilteredRubrics().length === 0 ? (
+                  <div className="text-center py-12">
+                    <Icon name="FolderOpen" className="w-16 h-16 text-gray-300 mx-auto mb-4" />
+                    <p className="text-gray-500 text-lg mb-2">No rubrics found</p>
+                    <p className="text-gray-400 text-sm">
+                      {rubricSearchQuery || rubricFilterTeacher 
+                        ? 'Try adjusting your search or filter'
+                        : 'Create your first rubric by clicking "Save Rubric" below'}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {getFilteredRubrics().map(rubric => {
+                      const isMyRubric = rubric.teacherIds.includes(selectedTeacher.id);
+                      return (
+                        <div
+                          key={rubric.id}
+                          className="border-2 border-gray-200 rounded-lg p-4 hover:border-purple-500 hover:shadow-md transition-all"
+                        >
+                          <div className="flex items-start justify-between mb-3">
+                            <div className="flex-1">
+                              <h3 className="font-semibold text-gray-900 text-lg mb-1">{rubric.name}</h3>
+                              <div className="flex items-center gap-2 text-sm text-gray-500">
+                                <Icon name="User" className="w-4 h-4" />
+                                <span>{rubric.teacherNames.join(', ')}</span>
+                              </div>
+                              {isMyRubric && (
+                                <span className="inline-block mt-1 px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded-full">
+                                  My Rubric
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          
+                          {/* Rubric Items Preview */}
+                          <div className="bg-gray-50 rounded-lg p-3 mb-3">
+                            <p className="text-xs font-semibold text-gray-600 mb-2">{rubric.items.length} items:</p>
+                            <div className="space-y-1">
+                              {rubric.items.slice(0, 3).map((item, idx) => (
+                                <div key={idx} className="flex justify-between text-xs text-gray-700">
+                                  <span className="truncate">{item.name}</span>
+                                  <span className="font-medium ml-2">{item.maxPoints}pts</span>
+                                </div>
+                              ))}
+                              {rubric.items.length > 3 && (
+                                <p className="text-xs text-gray-500 italic">
+                                  +{rubric.items.length - 3} more items...
+                                </p>
+                              )}
+                            </div>
+                            <div className="mt-2 pt-2 border-t border-gray-200">
+                              <p className="text-xs font-semibold text-gray-700">
+                                Total: {rubric.items.reduce((sum, item) => sum + item.maxPoints, 0)} points
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* Action Buttons */}
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => loadRubric(rubric)}
+                              className="flex-1 px-3 py-2 bg-purple-600 text-white text-sm font-medium rounded-lg hover:bg-purple-700 transition-colors flex items-center justify-center gap-1"
+                            >
+                              <Icon name="Download" className="w-4 h-4" />
+                              Load
+                            </button>
+                            {isMyRubric && (
+                              <button
+                                onClick={() => deleteRubric(rubric.id, rubric.name)}
+                                className="px-3 py-2 bg-red-100 text-red-600 text-sm font-medium rounded-lg hover:bg-red-200 transition-colors"
+                              >
+                                <Icon name="Trash2" className="w-4 h-4" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Modal Footer */}
+              <div className="border-t border-gray-200 p-4 bg-gray-50">
+                <div className="flex justify-between items-center">
+                  <p className="text-sm text-gray-600">
+                    Showing {getFilteredRubrics().length} of {allRubrics.length} rubrics
+                  </p>
+                  <button
+                    onClick={() => setShowRubricBrowser(false)}
+                    className="px-4 py-2 bg-gray-200 text-gray-700 font-medium rounded-lg hover:bg-gray-300 transition-colors"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
