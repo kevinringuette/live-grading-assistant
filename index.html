@@ -1385,6 +1385,18 @@ function GradingInterface() {
     }
   };
 
+  const getAriaSort = (field) => {
+    if (sortField !== field) return 'none';
+    return sortDirection === 'asc' ? 'ascending' : 'descending';
+  };
+
+  const handleHeaderKeyDown = (event, field) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      toggleSort(field);
+    }
+  };
+
   const sortedStudentsForResults = useMemo(() => {
     const studentsWithGrades = students.map(student => {
       const grade = grades[student.id] || { scores: {}, comments: '', completed: false };
@@ -2558,12 +2570,15 @@ function GradingInterface() {
           <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Final Grades</h2>
             <div className="overflow-x-auto">
-              <table className="min-w-full border border-gray-200 text-sm">
+              <table className="min-w-full border border-gray-200 text-sm border-collapse" role="table">
                 <thead className="bg-gray-50">
                   <tr>
                     <th
                       scope="col"
                       onClick={() => toggleSort('name')}
+                      onKeyDown={(event) => handleHeaderKeyDown(event, 'name')}
+                      aria-sort={getAriaSort('name')}
+                      tabIndex={0}
                       className="px-3 py-2 border-b border-gray-200 text-left font-semibold text-gray-700 cursor-pointer"
                     >
                       Student Name
@@ -2572,6 +2587,9 @@ function GradingInterface() {
                     <th
                       scope="col"
                       onClick={() => toggleSort('studentId')}
+                      onKeyDown={(event) => handleHeaderKeyDown(event, 'studentId')}
+                      aria-sort={getAriaSort('studentId')}
+                      tabIndex={0}
                       className="px-3 py-2 border-b border-gray-200 text-left font-semibold text-gray-700 cursor-pointer"
                     >
                       Student ID
@@ -2579,6 +2597,7 @@ function GradingInterface() {
                     </th>
                     <th
                       scope="col"
+                      aria-sort="none"
                       className="px-3 py-2 border-b border-gray-200 text-left font-semibold text-gray-700"
                     >
                       Email
@@ -2586,6 +2605,9 @@ function GradingInterface() {
                     <th
                       scope="col"
                       onClick={() => toggleSort('status')}
+                      onKeyDown={(event) => handleHeaderKeyDown(event, 'status')}
+                      aria-sort={getAriaSort('status')}
+                      tabIndex={0}
                       className="px-3 py-2 border-b border-gray-200 text-left font-semibold text-gray-700 cursor-pointer"
                     >
                       Status
@@ -2596,6 +2618,9 @@ function GradingInterface() {
                         key={item.name}
                         scope="col"
                         onClick={() => toggleSort(item.name)}
+                        onKeyDown={(event) => handleHeaderKeyDown(event, item.name)}
+                        aria-sort={getAriaSort(item.name)}
+                        tabIndex={0}
                         className="px-3 py-2 border-b border-gray-200 text-center font-semibold text-gray-700 cursor-pointer"
                       >
                         {item.name} / {item.maxPoints}
@@ -2605,6 +2630,9 @@ function GradingInterface() {
                     <th
                       scope="col"
                       onClick={() => toggleSort('total')}
+                      onKeyDown={(event) => handleHeaderKeyDown(event, 'total')}
+                      aria-sort={getAriaSort('total')}
+                      tabIndex={0}
                       className="px-3 py-2 border-b border-gray-200 text-center font-semibold text-gray-700 cursor-pointer"
                     >
                       Total / {maxTotal}
@@ -2612,6 +2640,7 @@ function GradingInterface() {
                     </th>
                     <th
                       scope="col"
+                      aria-sort="none"
                       className="px-3 py-2 border-b border-gray-200 text-left font-semibold text-gray-700"
                     >
                       Comments
