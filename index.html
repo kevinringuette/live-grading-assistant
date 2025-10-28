@@ -786,16 +786,24 @@ function GradingInterface() {
       // Prepare student data
       const studentData = students.map(student => {
         const g = grades[student.id];
-        const total = g && g.completed 
+        const total = g && g.completed
           ? rubricItems.reduce((sum, item) => sum + (g.scores[item.name] || 0), 0)
           : null;
 
+        const rubricScores = rubricItems.map(item => ({
+          label: item.name,
+          score: g?.scores?.[item.name] ?? null,
+          maxPoints: item.maxPoints
+        }));
+
         return {
           name: student.name,
-          email: student.email,
+          email: student.email || '',
           studentId: student.studentId,
           completed: g?.completed || false,
+          status: g?.completed ? 'Graded' : 'Not Graded',
           scores: g?.scores || {},
+          rubricScores,
           comments: g?.comments || '',
           total: total
         };
@@ -807,10 +815,12 @@ function GradingInterface() {
           name: selectedTeacher.name,
           email: selectedTeacher.email
         },
+        assignmentName,
         sections: selectedSections.map(section => ({
           id: section.sectionId,
           name: section.name
         })),
+        sectionNames: selectedSections.map(section => section.name),
         assignment: {
           name: assignmentName,
           rubric: rubricItems.map(item => ({
@@ -818,6 +828,11 @@ function GradingInterface() {
             maxPoints: item.maxPoints
           })),
           maxTotal: rubricItems.reduce((sum, item) => sum + item.maxPoints, 0)
+        },
+        rubricTotals: {
+          titles: rubricItems.map(item => item.name),
+          maxPoints: rubricItems.map(item => item.maxPoints),
+          overallMax: rubricItems.reduce((sum, item) => sum + item.maxPoints, 0)
         },
         students: studentData,
         summary: {
@@ -1382,6 +1397,9 @@ function GradingInterface() {
       if (sortField === 'name') {
         aVal = a.name;
         bVal = b.name;
+      } else if (sortField === 'studentId') {
+        aVal = a.studentId || '';
+        bVal = b.studentId || '';
       } else if (sortField === 'total') {
         aVal = a.total;
         bVal = b.total;
@@ -2438,7 +2456,13 @@ function GradingInterface() {
   if (step === 'results') {
     const completedCount = Object.values(grades).filter(g => g.completed).length;
     const maxTotal = calculateMaxTotal();
-    
+    const renderSortIndicator = (field) => {
+      if (sortField !== field) return null;
+      return (
+        <span className="ml-1 text-xs text-gray-500">{sortDirection === 'asc' ? '▲' : '▼'}</span>
+      );
+    };
+
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
         <div className="max-w-7xl mx-auto">
@@ -2473,7 +2497,7 @@ function GradingInterface() {
                   ) : (
                     <>
                       <Icon name="mail" className="w-5 h-5" />
-                      Draft Email
+                      Draft Emails
                     </>
                   )}
                 </button>
@@ -2533,16 +2557,92 @@ function GradingInterface() {
 
           <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Final Grades</h2>
-            <SpreadsheetResults
-              students={students}
-              grades={grades}
-              rubricItems={rubricItems}
-              assignmentName={assignmentName}
-              updateScore={updateScore}
-              updateComments={updateComments}
-              calculateTotal={calculateTotal}
-              calculateMaxTotal={calculateMaxTotal}
-            />
+            <div className="overflow-x-auto">
+              <table className="min-w-full border border-gray-200 text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th
+                      scope="col"
+                      onClick={() => toggleSort('name')}
+                      className="px-3 py-2 border-b border-gray-200 text-left font-semibold text-gray-700 cursor-pointer"
+                    >
+                      Student Name
+                      {renderSortIndicator('name')}
+                    </th>
+                    <th
+                      scope="col"
+                      onClick={() => toggleSort('studentId')}
+                      className="px-3 py-2 border-b border-gray-200 text-left font-semibold text-gray-700 cursor-pointer"
+                    >
+                      Student ID
+                      {renderSortIndicator('studentId')}
+                    </th>
+                    <th
+                      scope="col"
+                      className="px-3 py-2 border-b border-gray-200 text-left font-semibold text-gray-700"
+                    >
+                      Email
+                    </th>
+                    <th
+                      scope="col"
+                      onClick={() => toggleSort('status')}
+                      className="px-3 py-2 border-b border-gray-200 text-left font-semibold text-gray-700 cursor-pointer"
+                    >
+                      Status
+                      {renderSortIndicator('status')}
+                    </th>
+                    {rubricItems.map(item => (
+                      <th
+                        key={item.name}
+                        scope="col"
+                        onClick={() => toggleSort(item.name)}
+                        className="px-3 py-2 border-b border-gray-200 text-center font-semibold text-gray-700 cursor-pointer"
+                      >
+                        {item.name} / {item.maxPoints}
+                        {renderSortIndicator(item.name)}
+                      </th>
+                    ))}
+                    <th
+                      scope="col"
+                      onClick={() => toggleSort('total')}
+                      className="px-3 py-2 border-b border-gray-200 text-center font-semibold text-gray-700 cursor-pointer"
+                    >
+                      Total / {maxTotal}
+                      {renderSortIndicator('total')}
+                    </th>
+                    <th
+                      scope="col"
+                      className="px-3 py-2 border-b border-gray-200 text-left font-semibold text-gray-700"
+                    >
+                      Comments
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedStudentsForResults.map(student => (
+                    <tr key={student.id} className="hover:bg-gray-50">
+                      <td className="px-3 py-2 border-t border-gray-200 text-gray-900 whitespace-nowrap">{student.name}</td>
+                      <td className="px-3 py-2 border-t border-gray-200 text-gray-700 whitespace-nowrap">{student.studentId || ''}</td>
+                      <td className="px-3 py-2 border-t border-gray-200 text-gray-700 whitespace-nowrap">{student.email || ''}</td>
+                      <td className="px-3 py-2 border-t border-gray-200 text-gray-700 whitespace-nowrap">
+                        {student.grade.completed ? 'Graded' : 'Not Graded'}
+                      </td>
+                      {rubricItems.map(item => (
+                        <td key={item.name} className="px-3 py-2 border-t border-gray-200 text-center text-gray-800">
+                          {student.grade.scores[item.name] ?? ''}
+                        </td>
+                      ))}
+                      <td className="px-3 py-2 border-t border-gray-200 text-center text-gray-900 font-semibold">
+                        {student.total ?? ''}
+                      </td>
+                      <td className="px-3 py-2 border-t border-gray-200 text-gray-700 align-top whitespace-pre-wrap">
+                        {student.grade.comments || ''}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <div className="mt-6 bg-white rounded-lg shadow-sm border border-gray-200 p-6">
