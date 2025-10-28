@@ -8,8 +8,6 @@
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
-  <link href="https://unpkg.com/tabulator-tables@5.6.2/dist/css/tabulator.min.css" rel="stylesheet">
-  <script src="https://unpkg.com/tabulator-tables@5.6.2/dist/js/tabulator.min.js"></script>
   <script>
     tailwind.config = {
       theme: {
@@ -113,141 +111,6 @@ function chunk(arr, size = 10) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
-}
-
-// Spreadsheet component for editable grade tables
-function SpreadsheetResults({ students, grades, rubricItems, assignmentName, updateScore, updateComments, calculateTotal, calculateMaxTotal }) {
-  const gridRef = React.useRef(null);
-  const tableRef = React.useRef(null);
-
-  // build rows for Tabulator from your state
-  const buildData = React.useCallback(() => {
-    return students.map(s => {
-      const g = grades[s.id] || { scores: {}, comments: '', completed: false };
-      const row = {
-        _id: s.id,
-        studentName: s.name,
-        studentId: s.studentId,
-        status: g.completed ? "Graded" : "Not Graded",
-        comments: g.comments || "",
-      };
-      rubricItems.forEach(item => { row[item.name] = g.scores[item.name] ?? null; });
-      row.Total = calculateTotal(g);
-      return row;
-    });
-  }, [students, grades, rubricItems, calculateTotal]);
-
-  // build column definitions
-  const buildColumns = React.useCallback(() => {
-    const base = [
-      { title: "Student Name", field: "studentName", frozen: true, headerFilter: "input", widthGrow: 2 },
-      { title: "ID", field: "studentId", width: 110, headerFilter: "input" },
-      { title: "Status", field: "status", width: 120, headerFilter: "list", headerFilterParams: { values: true } },
-    ];
-
-    const rubricCols = rubricItems.map(item => ({
-      title: `${item.name} / ${item.maxPoints}`,
-      field: item.name,
-      hozAlign: "center",
-      editor: "number",
-      validator: ["integer", { type: val => val >= 0 && val <= item.maxPoints, parameters: {}}],
-      width: 130,
-      bottomCalc: "avg",
-      bottomCalcFormatter: cell => {
-        const v = cell.getValue();
-        return v ? Math.round(v) : "--";
-      }
-    }));
-
-    const tail = [
-      { title: `Total / ${calculateMaxTotal()}`, field: "Total", hozAlign: "center", width: 130, bottomCalc: "avg",
-        bottomCalcFormatter: cell => {
-          const v = cell.getValue();
-          return v ? Math.round(v) : "--";
-        }
-      },
-      { title: "Comments", field: "comments", editor: "input", widthGrow: 2 }
-    ];
-
-    return [...base, ...rubricCols, ...tail];
-  }, [rubricItems, calculateMaxTotal]);
-
-  // initialize Tabulator once
-  React.useEffect(() => {
-    if (!gridRef.current) return;
-
-    tableRef.current = new Tabulator(gridRef.current, {
-      height: 520,
-      layout: "fitDataStretch",
-      reactiveData: false,
-      data: buildData(),
-      columns: buildColumns(),
-      clipboard: true,          // copy/paste
-      clipboardPasteAction: "update",
-      movableColumns: true,
-      resizableColumnFit: true,
-      columnDefaults: { headerHozAlign: "center" },
-      initialSort: [{ column: "studentName", dir: "asc" }],
-      placeholder: "No students to show",
-      rowHeader: { formatter: "rownum", hozAlign: "right", width: 40 },
-      // persist changes back to React state
-      cellEdited: (cell) => {
-        const field = cell.getField();
-        const row = cell.getRow().getData();
-        const studentId = row._id;
-        if (field === "comments") {
-          updateComments(studentId, row.comments || "");
-          return;
-        }
-        if (field !== "studentName" && field !== "studentId" && field !== "status" && field !== "Total") {
-          const val = cell.getValue();
-          updateScore(studentId, field, Number.isFinite(val) ? Number(val) : 0);
-          // recalc Total in the grid after React sets state (best-effort immediate calc too)
-          const g = grades[studentId] || { scores: {}, comments: "", completed: false };
-          const temp = { ...g, scores: { ...g.scores, [field]: Number(val) || 0 } };
-          cell.getRow().update({ Total: calculateTotal(temp) });
-        }
-      },
-    });
-
-    return () => { tableRef.current?.destroy(); tableRef.current = null; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // mount once
-
-  // when data changes, refresh table rows
-  React.useEffect(() => {
-    if (tableRef.current) {
-      tableRef.current.replaceData(buildData());
-    }
-  }, [buildData]);
-
-  // when columns (rubric) change, rebuild columns
-  React.useEffect(() => {
-    if (tableRef.current) {
-      tableRef.current.setColumns(buildColumns());
-      tableRef.current.replaceData(buildData());
-    }
-  }, [buildColumns, buildData]);
-
-  const downloadCSV = () => {
-    tableRef.current?.download("csv", `${assignmentName || "grades"}.csv`);
-  };
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2">
-        <button onClick={() => tableRef.current?.download("xlsx", `${assignmentName || "grades"}.xlsx`, { sheetName: "Grades" })}
-                className="px-3 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors">
-          Download Excel
-        </button>
-        <button onClick={downloadCSV} className="px-3 py-2 bg-gray-700 text-white rounded hover:bg-gray-800 transition-colors">
-          Download CSV
-        </button>
-        <span className="text-sm text-gray-500">Tip: Cmd/Ctrl-C and Cmd/Ctrl-V work with Google Sheets / Excel.</span>
-      </div>
-      <div ref={gridRef} className="tabulator"></div>
-    </div>
-  );
 }
 
 function GradingInterface() {
@@ -786,19 +649,90 @@ function GradingInterface() {
       // Prepare student data
       const studentData = students.map(student => {
         const g = grades[student.id];
-        const total = g && g.completed 
+        const total = g && g.completed
           ? rubricItems.reduce((sum, item) => sum + (g.scores[item.name] || 0), 0)
           : null;
 
+        const rubricScores = rubricItems.map(item => ({
+          label: item.name,
+          score: g?.scores?.[item.name] ?? null,
+          maxPoints: item.maxPoints
+        }));
+
         return {
           name: student.name,
-          email: student.email,
+          email: student.email || '',
           studentId: student.studentId,
           completed: g?.completed || false,
+          status: g?.completed ? 'Graded' : 'Not Graded',
           scores: g?.scores || {},
+          rubricScores,
           comments: g?.comments || '',
           total: total
         };
+      });
+
+      // Prepare payload
+      const payload = {
+        teacher: {
+          name: selectedTeacher.name,
+          email: selectedTeacher.email
+        },
+        assignmentName,
+        sections: selectedSections.map(section => ({
+          id: section.sectionId,
+          name: section.name
+        })),
+        sectionNames: selectedSections.map(section => section.name),
+        assignment: {
+          name: assignmentName,
+          rubric: rubricItems.map(item => ({
+            name: item.name,
+            maxPoints: item.maxPoints
+          })),
+          maxTotal: rubricItems.reduce((sum, item) => sum + item.maxPoints, 0)
+        },
+        rubricTotals: {
+          titles: rubricItems.map(item => item.name),
+          maxPoints: rubricItems.map(item => item.maxPoints),
+          overallMax: rubricItems.reduce((sum, item) => sum + item.maxPoints, 0)
+        },
+        students: studentData,
+        summary: {
+          totalStudents: students.length,
+          gradedStudents: students.filter(s => grades[s.id]?.completed).length,
+          averageScore: studentData.filter(s => s.completed && s.total !== null).length > 0
+            ? Math.round(studentData.filter(s => s.completed && s.total !== null).reduce((sum, s) => sum + s.total, 0) / studentData.filter(s => s.completed).length)
+            : null
+        },
+        timestamp: new Date().toISOString()
+      };
+
+      // Send to n8n webhook
+      const response = await fetch(CONFIG.N8N_EMAIL_WEBHOOK_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to send data to n8n: ${response.statusText}`);
+      }
+
+      const result = await response.json();
+      console.log('Email draft response:', result);
+      
+      setEmailDraftSuccess(true);
+      setTimeout(() => setEmailDraftSuccess(false), 5000);
+    } catch (err) {
+      console.error('Error drafting email:', err);
+      setEmailDraftError(err.message);
+    } finally {
+      setIsDraftingEmail(false);
+    }
+  };
       });
 
       // Prepare payload
@@ -1362,6 +1296,18 @@ function GradingInterface() {
   }, [sections, sectionQuery]);
 
   const toggleSort = (field) => {
+  const getAriaSort = (field) => {
+    if (sortField !== field) return 'none';
+    return sortDirection === 'asc' ? 'ascending' : 'descending';
+  };
+
+  const handleHeaderKeyDown = (event, field) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      toggleSort(field);
+    }
+  };
+
     if (sortField === field) {
       setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
     } else {
@@ -1382,6 +1328,9 @@ function GradingInterface() {
       if (sortField === 'name') {
         aVal = a.name;
         bVal = b.name;
+      } else if (sortField === 'studentId') {
+        aVal = a.studentId || '';
+        bVal = b.studentId || '';
       } else if (sortField === 'total') {
         aVal = a.total;
         bVal = b.total;
@@ -2368,16 +2317,93 @@ function GradingInterface() {
 
           <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Edit Grades Before Uploading</h2>
-            <SpreadsheetResults
-              students={students}
-              grades={grades}
-              rubricItems={rubricItems}
-              assignmentName={assignmentName}
-              updateScore={updateScore}
-              updateComments={updateComments}
-              calculateTotal={calculateTotal}
-              calculateMaxTotal={calculateMaxTotal}
-            />
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead className="bg-gray-50 border-b border-gray-200">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                      Student Name
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                      Status
+                    </th>
+                    {rubricItems.map(item => (
+                      <th key={item.name} className="px-6 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">
+                        {item.name}
+                        <div className="text-xs font-normal text-gray-500 mt-1">/ {item.maxPoints}</div>
+                      </th>
+                    ))}
+                    <th className="px-6 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">
+                      Total
+                      <div className="text-xs font-normal text-gray-500 mt-1">/ {maxTotal}</div>
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                      Comments
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {students.map((student) => {
+                    const grade = grades[student.id] || { scores: {}, comments: '', completed: false };
+                    const total = calculateTotal(grade);
+                    const isCompleted = grade.completed;
+                    
+                    return (
+                      <tr key={student.id} className={`${isCompleted ? 'bg-green-50' : 'bg-white'} hover:bg-blue-50 transition-colors`}>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <div className="flex items-center">
+                            <div className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold text-sm ${isCompleted ? 'bg-green-100 text-green-600' : 'bg-gray-100 text-gray-600'}`}>
+                              {getInitials(student.name)}
+                            </div>
+                            <div className="ml-3">
+                              <div className="text-sm font-medium text-gray-900">{student.name}</div>
+                              <div className="text-xs text-gray-500">ID: {student.studentId}</div>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          {isCompleted ? (
+                            <span className="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
+                              Graded
+                            </span>
+                          ) : (
+                            <span className="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800">
+                              Not Graded
+                            </span>
+                          )}
+                        </td>
+                        {rubricItems.map(item => (
+                          <td key={item.name} className="px-6 py-4 text-center whitespace-nowrap">
+                            <input
+                              type="number"
+                              value={grade.scores[item.name] ?? ''}
+                              onChange={(e) => updateScore(student.id, item.name, parseInt(e.target.value) || 0)}
+                              min="0"
+                              max={item.maxPoints}
+                              className="w-16 px-2 py-1 text-center border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            />
+                          </td>
+                        ))}
+                        <td className="px-6 py-4 text-center whitespace-nowrap">
+                          <span className={`text-lg font-bold ${isCompleted ? 'text-gray-900' : 'text-gray-400'}`}>
+                            {isCompleted ? total : '--'}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <input
+                            type="text"
+                            value={grade.comments}
+                            onChange={(e) => updateComments(student.id, e.target.value)}
+                            placeholder="Add comments..."
+                            className="w-full px-3 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <div className="mt-6 bg-white rounded-lg shadow-sm border border-gray-200 p-6">
@@ -2436,6 +2462,14 @@ function GradingInterface() {
   }
 
   if (step === 'results') {
+    const completedCount = Object.values(grades).filter(g => g.completed).length;
+    const maxTotal = calculateMaxTotal();
+    const renderSortIndicator = (field) => {
+      if (sortField !== field) return null;
+      return (
+        <span className="ml-1 text-xs text-gray-500">{sortDirection === 'asc' ? '▲' : '▼'}</span>
+      );
+    };
     const completedCount = Object.values(grades).filter(g => g.completed).length;
     const maxTotal = calculateMaxTotal();
     
@@ -2531,18 +2565,112 @@ function GradingInterface() {
             </div>
           )}
 
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+                    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Final Grades</h2>
-            <SpreadsheetResults
-              students={students}
-              grades={grades}
-              rubricItems={rubricItems}
-              assignmentName={assignmentName}
-              updateScore={updateScore}
-              updateComments={updateComments}
-              calculateTotal={calculateTotal}
-              calculateMaxTotal={calculateMaxTotal}
-            />
+            <div className="overflow-x-auto">
+              <table className="min-w-full border border-gray-200 text-sm border-collapse" role="table">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th
+                      scope="col"
+                      onClick={() => toggleSort('name')}
+                      onKeyDown={(event) => handleHeaderKeyDown(event, 'name')}
+                      aria-sort={getAriaSort('name')}
+                      tabIndex={0}
+                      className="px-3 py-2 border-b border-gray-200 text-left font-semibold text-gray-700 cursor-pointer"
+                    >
+                      Student Name
+                      {renderSortIndicator('name')}
+                    </th>
+                    <th
+                      scope="col"
+                      onClick={() => toggleSort('studentId')}
+                      onKeyDown={(event) => handleHeaderKeyDown(event, 'studentId')}
+                      aria-sort={getAriaSort('studentId')}
+                      tabIndex={0}
+                      className="px-3 py-2 border-b border-gray-200 text-left font-semibold text-gray-700 cursor-pointer"
+                    >
+                      Student ID
+                      {renderSortIndicator('studentId')}
+                    </th>
+                    <th
+                      scope="col"
+                      aria-sort="none"
+                      className="px-3 py-2 border-b border-gray-200 text-left font-semibold text-gray-700"
+                    >
+                      Email
+                    </th>
+                    <th
+                      scope="col"
+                      onClick={() => toggleSort('status')}
+                      onKeyDown={(event) => handleHeaderKeyDown(event, 'status')}
+                      aria-sort={getAriaSort('status')}
+                      tabIndex={0}
+                      className="px-3 py-2 border-b border-gray-200 text-left font-semibold text-gray-700 cursor-pointer"
+                    >
+                      Status
+                      {renderSortIndicator('status')}
+                    </th>
+                    {rubricItems.map(item => (
+                      <th
+                        key={item.name}
+                        scope="col"
+                        onClick={() => toggleSort(item.name)}
+                        onKeyDown={(event) => handleHeaderKeyDown(event, item.name)}
+                        aria-sort={getAriaSort(item.name)}
+                        tabIndex={0}
+                        className="px-3 py-2 border-b border-gray-200 text-center font-semibold text-gray-700 cursor-pointer"
+                      >
+                        {item.name} / {item.maxPoints}
+                        {renderSortIndicator(item.name)}
+                      </th>
+                    ))}
+                    <th
+                      scope="col"
+                      onClick={() => toggleSort('total')}
+                      onKeyDown={(event) => handleHeaderKeyDown(event, 'total')}
+                      aria-sort={getAriaSort('total')}
+                      tabIndex={0}
+                      className="px-3 py-2 border-b border-gray-200 text-center font-semibold text-gray-700 cursor-pointer"
+                    >
+                      Total / {maxTotal}
+                      {renderSortIndicator('total')}
+                    </th>
+                    <th
+                      scope="col"
+                      aria-sort="none"
+                      className="px-3 py-2 border-b border-gray-200 text-left font-semibold text-gray-700"
+                    >
+                      Comments
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedStudentsForResults.map(student => (
+                    <tr key={student.id} className="hover:bg-gray-50">
+                      <td className="px-3 py-2 border-t border-gray-200 text-gray-900 whitespace-nowrap">{student.name}</td>
+                      <td className="px-3 py-2 border-t border-gray-200 text-gray-700 whitespace-nowrap">{student.studentId || ''}</td>
+                      <td className="px-3 py-2 border-t border-gray-200 text-gray-700 whitespace-nowrap">{student.email || ''}</td>
+                      <td className="px-3 py-2 border-t border-gray-200 text-gray-700 whitespace-nowrap">
+                        {student.grade.completed ? 'Graded' : 'Not Graded'}
+                      </td>
+                      {rubricItems.map(item => (
+                        <td key={item.name} className="px-3 py-2 border-t border-gray-200 text-center text-gray-800">
+                          {student.grade.scores[item.name] ?? ''}
+                        </td>
+                      ))}
+                      <td className="px-3 py-2 border-t border-gray-200 text-center text-gray-900 font-semibold">
+                        {student.total ?? ''}
+                      </td>
+                      <td className="px-3 py-2 border-t border-gray-200 text-gray-700 align-top whitespace-pre-wrap">
+                        {student.grade.comments || ''}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
           </div>
 
           <div className="mt-6 bg-white rounded-lg shadow-sm border border-gray-200 p-6">
