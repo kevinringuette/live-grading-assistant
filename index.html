@@ -89,54 +89,96 @@
     button { box-shadow: none; }
     button:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(241,140,32,.35); }
 
-    /* Table enhancements for sorting and copying */
-    .grades-table th,
-    .grades-table td {
-      user-select: text;
-      -webkit-user-select: text;
-      -moz-user-select: text;
-      -ms-user-select: text;
+    /* Spreadsheet-like table styles */
+    .spreadsheet-table {
+      border-collapse: separate;
+      border-spacing: 0;
+      user-select: none;
     }
 
-    .grades-table th.sortable {
-      cursor: pointer;
-      transition: background-color 150ms;
+    .spreadsheet-table th,
+    .spreadsheet-table td {
+      border: 1px solid #e5e7eb;
       position: relative;
     }
 
-    .grades-table th.sortable:hover {
-      background-color: rgba(241,140,32,.15);
+    .spreadsheet-table th {
+      background: #f3f4f6;
+      font-weight: 600;
+      position: sticky;
+      top: 0;
+      z-index: 10;
     }
 
-    .sort-icon {
-      display: inline-block;
-      margin-left: 0.25rem;
-      opacity: 0.4;
-      vertical-align: middle;
+    .spreadsheet-table td {
+      background: white;
+      cursor: cell;
     }
 
-    .sort-icon.active {
-      opacity: 1;
+    .spreadsheet-table td.selected-cell {
+      background: #dbeafe !important;
+      outline: 2px solid #3b82f6;
+      outline-offset: -2px;
+      z-index: 5;
     }
 
-    .copy-column-btn {
-      opacity: 0;
-      transition: opacity 150ms;
-      padding: 0.25rem;
-      margin-left: 0.25rem;
-      border-radius: 0.25rem;
+    .spreadsheet-table td.column-selected {
+      background: #eff6ff !important;
+    }
+
+    .spreadsheet-table td.row-selected {
+      background: #f0fdf4 !important;
+    }
+
+    .spreadsheet-table th.column-header-selected {
+      background: #bfdbfe !important;
+    }
+
+    .spreadsheet-table input {
+      border: none !important;
+      background: transparent !important;
+      width: 100%;
+      padding: 0;
+      outline: none !important;
+      box-shadow: none !important;
+    }
+
+    .spreadsheet-table input:focus {
+      outline: none !important;
+      box-shadow: none !important;
+      ring: 0 !important;
+    }
+
+    .spreadsheet-table td:focus-within {
+      outline: 2px solid #3b82f6;
+      outline-offset: -2px;
+      z-index: 5;
+    }
+
+    .cell-content {
+      min-height: 1.5rem;
+      padding: 0.5rem;
+      user-select: text;
+    }
+
+    .cell-content:focus {
+      outline: 2px solid #3b82f6;
+      outline-offset: -2px;
+    }
+
+    /* Column resize handle */
+    .resize-handle {
+      position: absolute;
+      right: 0;
+      top: 0;
+      bottom: 0;
+      width: 4px;
+      cursor: col-resize;
       background: transparent;
-      border: none;
-      cursor: pointer;
-      vertical-align: middle;
     }
 
-    .copy-column-btn:hover {
-      background-color: rgba(241,140,32,.2);
-    }
-
-    .grades-table th:hover .copy-column-btn {
-      opacity: 1;
+    .resize-handle:hover {
+      background: #3b82f6;
     }
   </style>
 </head>
@@ -290,6 +332,11 @@ function GradingInterface() {
   const [isDraftingEmail, setIsDraftingEmail] = useState(false);
   const [emailDraftSuccess, setEmailDraftSuccess] = useState(false);
   const [emailDraftError, setEmailDraftError] = useState(null);
+
+  // Spreadsheet table state
+  const [selectedCell, setSelectedCell] = useState(null); // { row: idx, col: idx }
+  const [selectedColumn, setSelectedColumn] = useState(null);
+  const tableRef = useRef(null);
 
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
@@ -1187,36 +1234,135 @@ function GradingInterface() {
     }
   };
 
-  const copyColumnToClipboard = (columnKey) => {
-    let data = [];
+  // Spreadsheet table handlers
+  const handleCellClick = (rowIdx, colIdx) => {
+    setSelectedCell({ row: rowIdx, col: colIdx });
+    setSelectedColumn(null);
+  };
+
+  const handleColumnHeaderClick = (colIdx) => {
+    setSelectedColumn(colIdx);
+    setSelectedCell(null);
+  };
+
+  const handleTableKeyDown = (e) => {
+    if (!selectedCell) return;
     
-    if (columnKey === 'name') {
+    const totalRows = students.length;
+    const totalCols = rubricItems.length + 4; // name, status, rubric items, total, comments
+    
+    let newRow = selectedCell.row;
+    let newCol = selectedCell.col;
+    
+    switch(e.key) {
+      case 'ArrowUp':
+        e.preventDefault();
+        newRow = Math.max(0, selectedCell.row - 1);
+        break;
+      case 'ArrowDown':
+        e.preventDefault();
+        newRow = Math.min(totalRows - 1, selectedCell.row + 1);
+        break;
+      case 'ArrowLeft':
+        e.preventDefault();
+        newCol = Math.max(0, selectedCell.col - 1);
+        break;
+      case 'ArrowRight':
+        e.preventDefault();
+        newCol = Math.min(totalCols - 1, selectedCell.col + 1);
+        break;
+      case 'Tab':
+        e.preventDefault();
+        if (e.shiftKey) {
+          newCol = selectedCell.col - 1;
+          if (newCol < 0) {
+            newCol = totalCols - 1;
+            newRow = Math.max(0, selectedCell.row - 1);
+          }
+        } else {
+          newCol = selectedCell.col + 1;
+          if (newCol >= totalCols) {
+            newCol = 0;
+            newRow = Math.min(totalRows - 1, selectedCell.row + 1);
+          }
+        }
+        break;
+      case 'Enter':
+        e.preventDefault();
+        newRow = Math.min(totalRows - 1, selectedCell.row + 1);
+        break;
+      default:
+        return;
+    }
+    
+    setSelectedCell({ row: newRow, col: newCol });
+    
+    // Focus the cell after state update
+    setTimeout(() => {
+      const cell = document.querySelector(`[data-row="${newRow}"][data-col="${newCol}"]`);
+      if (cell) {
+        const input = cell.querySelector('input');
+        if (input) {
+          input.focus();
+        } else {
+          cell.focus();
+        }
+      }
+    }, 0);
+  };
+
+  const copySelectedColumn = () => {
+    if (selectedColumn === null) return;
+    
+    let data = [];
+    const colIdx = selectedColumn;
+    
+    // Determine which column is selected
+    if (colIdx === 0) {
+      // Name column
       data = students.map(s => s.name);
-    } else if (columnKey === 'status') {
+    } else if (colIdx === 1) {
+      // Status column
       data = students.map(s => grades[s.id]?.completed ? 'Graded' : 'Not Graded');
-    } else if (columnKey === 'total') {
+    } else if (colIdx >= 2 && colIdx < 2 + rubricItems.length) {
+      // Rubric item column
+      const itemIdx = colIdx - 2;
+      const itemName = rubricItems[itemIdx].name;
+      data = students.map(s => {
+        const score = grades[s.id]?.scores[itemName];
+        return score !== undefined ? score.toString() : '';
+      });
+    } else if (colIdx === 2 + rubricItems.length) {
+      // Total column
       data = students.map(s => {
         const grade = grades[s.id];
         return grade?.completed ? calculateTotal(grade).toString() : '--';
       });
-    } else if (columnKey === 'comments') {
+    } else if (colIdx === 3 + rubricItems.length) {
+      // Comments column
       data = students.map(s => grades[s.id]?.comments || '');
-    } else {
-      // It's a rubric item
-      data = students.map(s => {
-        const score = grades[s.id]?.scores[columnKey];
-        return score !== undefined ? score.toString() : '';
-      });
     }
     
     const text = data.join('\n');
     navigator.clipboard.writeText(text).then(() => {
-      console.log(`Copied ${columnKey} column to clipboard`);
+      console.log('Column copied to clipboard');
     }).catch(err => {
       console.error('Error copying to clipboard:', err);
-      alert('Error copying to clipboard. Please try again.');
     });
   };
+
+  useEffect(() => {
+    const handleGlobalKeyDown = (e) => {
+      // Handle Ctrl+C / Cmd+C for copying column
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c' && selectedColumn !== null) {
+        e.preventDefault();
+        copySelectedColumn();
+      }
+    };
+    
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [selectedColumn, students, grades, rubricItems]);
 
   const updateScore = (studentId, rubricName, value) => {
     setGrades(prev => {
@@ -2361,193 +2507,152 @@ function GradingInterface() {
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-lg font-semibold text-pacifica-navy">Edit Grades Before Uploading</h2>
               <div className="text-sm text-pacifica-slate">
-                Click column headers to sort • Hover headers to copy
+                Use arrow keys to navigate • Click column headers to select • Ctrl+C to copy column
               </div>
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full grades-table">
-                <thead className="bg-pacifica-gray bg-opacity-20 border-b border-pacifica-gray">
+            <div 
+              className="overflow-x-auto" 
+              onKeyDown={handleTableKeyDown}
+              tabIndex={-1}
+              ref={tableRef}
+            >
+              <table className="w-full spreadsheet-table">
+                <thead>
                   <tr>
                     <th 
-                      className="px-6 py-3 text-left text-xs font-medium text-pacifica-navy uppercase tracking-wider sortable"
-                      onClick={() => toggleSort('name')}
+                      className={`px-4 py-3 text-left text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === 0 ? 'column-header-selected' : ''}`}
+                      onClick={() => handleColumnHeaderClick(0)}
+                      style={{ cursor: 'pointer' }}
                     >
-                      <div className="flex items-center">
-                        <span>Student Name</span>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            copyColumnToClipboard('name');
-                          }}
-                          className="copy-column-btn"
-                          title="Copy column"
-                        >
-                          <Icon name="copy" className="w-3 h-3" />
-                        </button>
-                        <span className={`sort-icon ${sortField === 'name' ? 'active' : ''}`}>
-                          {sortField === 'name' ? (
-                            sortDirection === 'asc' ? '↑' : '↓'
-                          ) : '↕'}
-                        </span>
-                      </div>
+                      Student Name
                     </th>
                     <th 
-                      className="px-6 py-3 text-left text-xs font-medium text-pacifica-navy uppercase tracking-wider sortable"
-                      onClick={() => toggleSort('status')}
+                      className={`px-4 py-3 text-left text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === 1 ? 'column-header-selected' : ''}`}
+                      onClick={() => handleColumnHeaderClick(1)}
+                      style={{ cursor: 'pointer' }}
                     >
-                      <div className="flex items-center">
-                        <span>Status</span>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            copyColumnToClipboard('status');
-                          }}
-                          className="copy-column-btn"
-                          title="Copy column"
-                        >
-                          <Icon name="copy" className="w-3 h-3" />
-                        </button>
-                        <span className={`sort-icon ${sortField === 'status' ? 'active' : ''}`}>
-                          {sortField === 'status' ? (
-                            sortDirection === 'asc' ? '↑' : '↓'
-                          ) : '↕'}
-                        </span>
-                      </div>
+                      Status
                     </th>
-                    {rubricItems.map(item => (
+                    {rubricItems.map((item, idx) => (
                       <th 
-                        key={item.name} 
-                        className="px-6 py-3 text-center text-xs font-medium text-pacifica-navy uppercase tracking-wider sortable"
-                        onClick={() => toggleSort(item.name)}
+                        key={item.name}
+                        className={`px-4 py-3 text-center text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === idx + 2 ? 'column-header-selected' : ''}`}
+                        onClick={() => handleColumnHeaderClick(idx + 2)}
+                        style={{ cursor: 'pointer' }}
                       >
-                        <div className="flex flex-col items-center">
-                          <div className="flex items-center justify-center">
-                            <span>{item.name}</span>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                copyColumnToClipboard(item.name);
-                              }}
-                              className="copy-column-btn"
-                              title="Copy column"
-                            >
-                              <Icon name="copy" className="w-3 h-3" />
-                            </button>
-                            <span className={`sort-icon ${sortField === item.name ? 'active' : ''}`}>
-                              {sortField === item.name ? (
-                                sortDirection === 'asc' ? '↑' : '↓'
-                              ) : '↕'}
-                            </span>
-                          </div>
-                          <div className="text-xs font-normal text-pacifica-slate mt-1">/ {item.maxPoints}</div>
-                        </div>
+                        <div>{item.name}</div>
+                        <div className="text-xs font-normal text-pacifica-slate mt-1">/ {item.maxPoints}</div>
                       </th>
                     ))}
                     <th 
-                      className="px-6 py-3 text-center text-xs font-medium text-pacifica-navy uppercase tracking-wider sortable"
-                      onClick={() => toggleSort('total')}
+                      className={`px-4 py-3 text-center text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === rubricItems.length + 2 ? 'column-header-selected' : ''}`}
+                      onClick={() => handleColumnHeaderClick(rubricItems.length + 2)}
+                      style={{ cursor: 'pointer' }}
                     >
-                      <div className="flex flex-col items-center">
-                        <div className="flex items-center justify-center">
-                          <span>Total</span>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              copyColumnToClipboard('total');
-                            }}
-                            className="copy-column-btn"
-                            title="Copy column"
-                          >
-                            <Icon name="copy" className="w-3 h-3" />
-                          </button>
-                          <span className={`sort-icon ${sortField === 'total' ? 'active' : ''}`}>
-                            {sortField === 'total' ? (
-                              sortDirection === 'asc' ? '↑' : '↓'
-                            ) : '↕'}
-                          </span>
-                        </div>
-                        <div className="text-xs font-normal text-pacifica-slate mt-1">/ {maxTotal}</div>
-                      </div>
+                      <div>Total</div>
+                      <div className="text-xs font-normal text-pacifica-slate mt-1">/ {maxTotal}</div>
                     </th>
                     <th 
-                      className="px-6 py-3 text-left text-xs font-medium text-pacifica-navy uppercase tracking-wider sortable"
-                      onClick={() => toggleSort('comments')}
+                      className={`px-4 py-3 text-left text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === rubricItems.length + 3 ? 'column-header-selected' : ''}`}
+                      onClick={() => handleColumnHeaderClick(rubricItems.length + 3)}
+                      style={{ cursor: 'pointer' }}
                     >
-                      <div className="flex items-center">
-                        <span>Comments</span>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            copyColumnToClipboard('comments');
-                          }}
-                          className="copy-column-btn"
-                          title="Copy column"
-                        >
-                          <Icon name="copy" className="w-3 h-3" />
-                        </button>
-                        <span className={`sort-icon ${sortField === 'comments' ? 'active' : ''}`}>
-                          {sortField === 'comments' ? (
-                            sortDirection === 'asc' ? '↑' : '↓'
-                          ) : '↕'}
-                        </span>
-                      </div>
+                      Comments
                     </th>
                   </tr>
                 </thead>
-                <tbody className="bg-white divide-y divide-pacifica-gray">
-                  {sortedStudentsForResults.map((student) => {
+                <tbody>
+                  {students.map((student, rowIdx) => {
                     const grade = grades[student.id] || { scores: {}, comments: '', completed: false };
                     const total = calculateTotal(grade);
                     const isCompleted = grade.completed;
                     
                     return (
-                      <tr key={student.id} className={`${isCompleted ? 'bg-green-50' : 'bg-white'} hover:bg-pacifica-orange hover:bg-opacity-5 transition-colors`}>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <div className="flex items-center">
-                            <div className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold text-sm ${isCompleted ? 'bg-green-100 text-green-600' : 'bg-pacifica-gray bg-opacity-30 text-pacifica-slate'}`}>
-                              {getInitials(student.name)}
-                            </div>
-                            <div className="ml-3">
-                              <div className="text-sm font-medium text-pacifica-navy">{student.name}</div>
-                              <div className="text-xs text-pacifica-slate">ID: {student.studentId}</div>
+                      <tr key={student.id}>
+                        <td 
+                          className={`px-4 py-2 ${selectedCell?.row === rowIdx && selectedCell?.col === 0 ? 'selected-cell' : selectedColumn === 0 ? 'column-selected' : ''}`}
+                          onClick={() => handleCellClick(rowIdx, 0)}
+                          data-row={rowIdx}
+                          data-col={0}
+                          tabIndex={0}
+                        >
+                          <div className="cell-content">
+                            <div className="flex items-center">
+                              <div className={`w-8 h-8 rounded-full flex items-center justify-center font-semibold text-xs ${isCompleted ? 'bg-green-100 text-green-600' : 'bg-pacifica-gray bg-opacity-30 text-pacifica-slate'}`}>
+                                {getInitials(student.name)}
+                              </div>
+                              <div className="ml-2">
+                                <div className="text-sm font-medium text-pacifica-navy">{student.name}</div>
+                                <div className="text-xs text-pacifica-slate">ID: {student.studentId}</div>
+                              </div>
                             </div>
                           </div>
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          {isCompleted ? (
-                            <span className="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
-                              Graded
-                            </span>
-                          ) : (
-                            <span className="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-pacifica-gray bg-opacity-30 text-pacifica-slate">
-                              Not Graded
-                            </span>
-                          )}
+                        <td 
+                          className={`px-4 py-2 ${selectedCell?.row === rowIdx && selectedCell?.col === 1 ? 'selected-cell' : selectedColumn === 1 ? 'column-selected' : ''}`}
+                          onClick={() => handleCellClick(rowIdx, 1)}
+                          data-row={rowIdx}
+                          data-col={1}
+                          tabIndex={0}
+                        >
+                          <div className="cell-content">
+                            {isCompleted ? (
+                              <span className="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
+                                Graded
+                              </span>
+                            ) : (
+                              <span className="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-pacifica-gray bg-opacity-30 text-pacifica-slate">
+                                Not Graded
+                              </span>
+                            )}
+                          </div>
                         </td>
-                        {rubricItems.map(item => (
-                          <td key={item.name} className="px-6 py-4 text-center whitespace-nowrap">
+                        {rubricItems.map((item, colIdx) => (
+                          <td 
+                            key={item.name}
+                            className={`px-4 py-2 text-center ${selectedCell?.row === rowIdx && selectedCell?.col === colIdx + 2 ? 'selected-cell' : selectedColumn === colIdx + 2 ? 'column-selected' : ''}`}
+                            onClick={() => handleCellClick(rowIdx, colIdx + 2)}
+                            data-row={rowIdx}
+                            data-col={colIdx + 2}
+                          >
                             <input
                               type="number"
                               value={grade.scores[item.name] ?? ''}
                               onChange={(e) => updateScore(student.id, item.name, parseInt(e.target.value) || 0)}
+                              onFocus={() => setSelectedCell({ row: rowIdx, col: colIdx + 2 })}
                               min="0"
                               max={item.maxPoints}
-                              className="w-16 px-2 py-1 text-center border-2 border-pacifica-gray rounded focus:ring-2 focus:ring-pacifica-orange focus:border-transparent"
+                              className="text-center"
+                              style={{ width: '60px', margin: '0 auto', display: 'block' }}
                             />
                           </td>
                         ))}
-                        <td className="px-6 py-4 text-center whitespace-nowrap">
-                          <span className={`text-lg font-bold ${isCompleted ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}>
-                            {isCompleted ? total : '--'}
-                          </span>
+                        <td 
+                          className={`px-4 py-2 text-center ${selectedCell?.row === rowIdx && selectedCell?.col === rubricItems.length + 2 ? 'selected-cell' : selectedColumn === rubricItems.length + 2 ? 'column-selected' : ''}`}
+                          onClick={() => handleCellClick(rowIdx, rubricItems.length + 2)}
+                          data-row={rowIdx}
+                          data-col={rubricItems.length + 2}
+                          tabIndex={0}
+                        >
+                          <div className="cell-content text-center">
+                            <span className={`text-lg font-bold ${isCompleted ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}>
+                              {isCompleted ? total : '--'}
+                            </span>
+                          </div>
                         </td>
-                        <td className="px-6 py-4">
+                        <td 
+                          className={`px-4 py-2 ${selectedCell?.row === rowIdx && selectedCell?.col === rubricItems.length + 3 ? 'selected-cell' : selectedColumn === rubricItems.length + 3 ? 'column-selected' : ''}`}
+                          onClick={() => handleCellClick(rowIdx, rubricItems.length + 3)}
+                          data-row={rowIdx}
+                          data-col={rubricItems.length + 3}
+                        >
                           <input
                             type="text"
                             value={grade.comments}
                             onChange={(e) => updateComments(student.id, e.target.value)}
+                            onFocus={() => setSelectedCell({ row: rowIdx, col: rubricItems.length + 3 })}
                             placeholder="Add comments..."
-                            className="w-full px-3 py-1 text-sm border-2 border-pacifica-gray rounded focus:ring-2 focus:ring-pacifica-orange focus:border-transparent"
+                            style={{ width: '100%' }}
                           />
                         </td>
                       </tr>
