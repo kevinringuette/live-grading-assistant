@@ -363,6 +363,30 @@ const blobToBase64 = (blob) =>
     reader.readAsDataURL(blob);
   });
 
+const waitForPdfjsLib = (() => {
+  let readyPromise = null;
+  return () => {
+    if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+    if (!readyPromise) {
+      readyPromise = new Promise((resolve, reject) => {
+        let attempts = 0;
+        const maxAttempts = 50;
+        const interval = setInterval(() => {
+          attempts += 1;
+          if (window.pdfjsLib) {
+            clearInterval(interval);
+            resolve(window.pdfjsLib);
+          } else if (attempts >= maxAttempts) {
+            clearInterval(interval);
+            reject(new Error('PDF.js failed to load'));
+          }
+        }, 100);
+      });
+    }
+    return readyPromise;
+  };
+})();
+
 function chunk(arr, size = 10) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
@@ -380,6 +404,22 @@ function InlinePDFPanel({ initialItems = [] }) {
   const [error, setError] = useState(null);
   const canvasRef = useRef(null);
   const pdfRef = useRef(null);
+  const itemsRef = useRef(initialItems);
+
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
+
+  useEffect(() => () => {
+    itemsRef.current.forEach(item => {
+      if (item?.type === 'blob' && item?.src?.startsWith('blob:')) {
+        URL.revokeObjectURL(item.src);
+      }
+    });
+    if (pdfRef.current?.destroy) {
+      try { pdfRef.current.destroy(); } catch (_) {}
+    }
+  }, []);
 
   const current = items[currentIdx];
 
@@ -390,51 +430,16 @@ function InlinePDFPanel({ initialItems = [] }) {
     return `${CONFIG.PDF_PROXY_URL}?url=${encodeURIComponent(rawUrl)}`;
   };
 
-  const loadPdf = async (src) => {
-    const lib = window.pdfjsLib;
-    if (!lib) {
-      setError('PDF.js is not available.');
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    setPageCount(null);
+  const clearCanvas = () => {
     const canvas = canvasRef.current;
     if (canvas) {
       const ctx = canvas.getContext('2d');
       if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
-    try {
-      if (pdfRef.current?.destroy) {
-        try {
-          await pdfRef.current.destroy();
-        } catch (_) {}
-      }
-      let loadingTask;
-      if (src.startsWith('blob:')) {
-        const resp = await fetch(src);
-        const buf = await resp.arrayBuffer();
-        loadingTask = lib.getDocument({ data: new Uint8Array(buf) });
-      } else {
-        loadingTask = lib.getDocument({ url: proxiedUrl(src) });
-      }
-      const pdf = await loadingTask.promise;
-      pdfRef.current = pdf;
-      setPageCount(pdf.numPages);
-      setScale(1.1);
-      setPageNum(1);
-      await renderPage(1);
-    } catch (e) {
-      console.error('PDF load error:', e);
-      setError('Failed to load PDF. Try a different source or use a local file.');
-      pdfRef.current = null;
-    } finally {
-      setLoading(false);
-    }
   };
 
-  const renderPage = async (targetPage = pageNum) => {
-    const pdf = pdfRef.current;
+  const renderPage = async (targetPage = pageNum, instance = null) => {
+    const pdf = instance || pdfRef.current;
     const canvas = canvasRef.current;
     if (!pdf || !canvas) return;
     try {
@@ -454,21 +459,117 @@ function InlinePDFPanel({ initialItems = [] }) {
     }
   };
 
+  const loadPdf = async (src) => {
+    if (!src) {
+      pdfRef.current = null;
+      clearCanvas();
+      setPageCount(null);
+      setPageNum(1);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setPageCount(null);
+    clearCanvas();
+    try {
+      const lib = await waitForPdfjsLib();
+      if (pdfRef.current?.destroy) {
+        try { await pdfRef.current.destroy(); } catch (_) {}
+      }
+      let loadingTask;
+      if (src.startsWith('blob:')) {
+        const resp = await fetch(src);
+        const buf = await resp.arrayBuffer();
+        loadingTask = lib.getDocument({ data: new Uint8Array(buf) });
+      } else {
+        loadingTask = lib.getDocument({ url: proxiedUrl(src) });
+      }
+      const pdf = await loadingTask.promise;
+      pdfRef.current = pdf;
+      setPageCount(pdf.numPages);
+      setScale(1.1);
+      setPageNum(1);
+      await renderPage(1, pdf);
+    } catch (e) {
+      console.error('PDF load error:', e);
+      setError('Failed to load PDF. Try a different source or use a local file.');
+      pdfRef.current = null;
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    if (current?.src) loadPdf(current.src);
+    if (current?.src) {
+      loadPdf(current.src);
+    } else {
+      loadPdf(null);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentIdx, current?.src]);
 
   useEffect(() => {
-    renderPage(pageNum);
+    if (pdfRef.current) {
+      renderPage(pageNum);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageNum, scale]);
 
-  const addByUrl = () => {
-    const url = prompt('Paste a PDF URL (Drive OK; we proxy it).');
+  const addFolderFromUrl = async (url) => {
+    const JSZipLib = window.JSZip;
+    if (!JSZipLib) {
+      setError('Folder import requires JSZip support.');
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const target = proxiedUrl(url);
+      const response = await fetch(target);
+      if (!response.ok) throw new Error(`Fetch failed with status ${response.status}`);
+      const arrayBuffer = await response.arrayBuffer();
+      const zip = await JSZipLib.loadAsync(arrayBuffer);
+      const pdfEntries = [];
+      const files = Object.values(zip.files || {}).filter(file => !file.dir && /\.pdf$/i.test(file.name));
+      for (const entry of files) {
+        const data = await entry.async('uint8array');
+        const blob = new Blob([data], { type: 'application/pdf' });
+        const objectUrl = URL.createObjectURL(blob);
+        const baseName = entry.name.split('/').pop() || 'PDF';
+        const title = baseName.replace(/\.pdf$/i, '');
+        pdfEntries.push({ title, src: objectUrl, type: 'blob' });
+      }
+      if (pdfEntries.length === 0) {
+        setError('No PDFs found in that folder.');
+        return;
+      }
+      const startIndex = items.length;
+      setItems(prev => [...prev, ...pdfEntries]);
+      setCurrentIdx(startIndex);
+    } catch (err) {
+      console.error('Folder import failed:', err);
+      setError('Failed to import folder URL. Make sure it downloads a ZIP containing PDFs.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const addFolderPrompt = async () => {
+    const url = prompt('Paste a folder download URL (ZIP) that contains PDFs.');
     if (!url) return;
+    await addFolderFromUrl(url.trim());
+  };
+
+  const addByUrl = async () => {
+    const url = prompt('Paste a PDF URL or ZIP download URL (Drive OK; we proxy it).');
+    if (!url) return;
+    const trimmed = url.trim();
+    if (/\.zip($|\?)/i.test(trimmed)) {
+      await addFolderFromUrl(trimmed);
+      return;
+    }
     const title = prompt('Title for this PDF:') || `PDF ${items.length + 1}`;
-    setItems(prev => [...prev, { title, src: url, type: 'url' }]);
+    setItems(prev => [...prev, { title, src: trimmed, type: 'url' }]);
     setCurrentIdx(items.length);
   };
 
@@ -487,7 +588,10 @@ function InlinePDFPanel({ initialItems = [] }) {
 
   const removeAt = (i) => {
     const copy = [...items];
-    copy.splice(i, 1);
+    const [removed] = copy.splice(i, 1);
+    if (removed?.type === 'blob' && removed?.src?.startsWith('blob:')) {
+      URL.revokeObjectURL(removed.src);
+    }
     setItems(copy);
     setCurrentIdx(idx => Math.max(0, Math.min(idx, copy.length - 1)));
     if (copy.length === 0) {
@@ -495,11 +599,7 @@ function InlinePDFPanel({ initialItems = [] }) {
       setPageCount(null);
       setPageNum(1);
       setError(null);
-      const canvas = canvasRef.current;
-      if (canvas) {
-        const ctx = canvas.getContext('2d');
-        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
-      }
+      clearCanvas();
     }
   };
 
@@ -507,20 +607,21 @@ function InlinePDFPanel({ initialItems = [] }) {
   const canNext = pageCount && pageNum < pageCount;
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
-      <div className="xl:col-span-4">
-        <div className="flex items-center gap-2 mb-3">
+    <div className="grid grid-cols-1 2xl:grid-cols-12 gap-4">
+      <div className="2xl:col-span-4">
+        <div className="flex flex-wrap items-center gap-2 mb-3">
           <button onClick={addByUrl} className="btn btn-primary">Add by URL</button>
+          <button onClick={addFolderPrompt} className="btn btn-outline">Add folder URL</button>
           <label className="btn btn-outline cursor-pointer">
             Open local
             <input type="file" accept="application/pdf" multiple className="hidden" onChange={onLocalFiles} />
           </label>
         </div>
-        <ul className="space-y-2 max-h-[55vh] overflow-y-auto pr-1">
+        <ul className="space-y-2 max-h-[60vh] overflow-y-auto pr-1">
           {items.map((p, i) => (
             <li
-              key={i}
-              className={`rounded-md border p-3 ${i === currentIdx ? 'border-pacifica-orange bg-pacifica-orange/10' : 'border-pacifica-gray'}`}
+              key={`${p.src}-${i}`}
+              className={`rounded-md border p-3 transition-colors ${i === currentIdx ? 'border-pacifica-orange bg-pacifica-orange/10' : 'border-pacifica-gray'}`}
             >
               <div className="flex items-start gap-2">
                 <button
@@ -542,18 +643,18 @@ function InlinePDFPanel({ initialItems = [] }) {
           ))}
           {items.length === 0 && (
             <p className="text-sm text-pacifica-slate italic">
-              No PDFs yet. Add one by URL or from your computer.
+              No PDFs yet. Add one by URL, folder, or from your computer.
             </p>
           )}
         </ul>
         <p className="text-xs text-pacifica-slate mt-3">
-          Note: URLs are fetched via your proxy to avoid CORS (Google Drive is OK).
+          URLs are fetched through the proxy to avoid CORS. Folder URLs should download a ZIP that contains PDFs.
         </p>
       </div>
 
-      <div className="xl:col-span-8">
+      <div className="2xl:col-span-8">
         <div className="border rounded-lg bg-white">
-          <div className="flex items-center justify-between p-3 border-b">
+          <div className="flex flex-wrap items-center justify-between gap-3 p-3 border-b">
             <div className="flex items-center gap-2">
               <button className="btn btn-outline" disabled={!canPrev} onClick={() => setPageNum(p => Math.max(1, p - 1))}>Prev</button>
               <div className="text-sm text-pacifica-slate">
@@ -577,16 +678,21 @@ function InlinePDFPanel({ initialItems = [] }) {
             </div>
           </div>
 
-          <div className="min-h-[70vh] flex items-center justify-center bg-pacifica-gray bg-opacity-10">
-            {error ? (
-              <div className="p-4 text-red-700 text-sm">{error}</div>
-            ) : (
-              <canvas ref={canvasRef} className="bg-white shadow-sm rounded m-3"></canvas>
+          <div className="relative min-h-[70vh] flex items-center justify-center bg-pacifica-gray bg-opacity-10">
+            {error && (
+              <div className="p-4 text-red-700 text-sm text-center max-w-sm">{error}</div>
+            )}
+            {!error && <canvas ref={canvasRef} className="bg-white shadow-sm rounded m-3"></canvas>}
+            {loading && (
+              <div className="absolute inset-0 bg-white bg-opacity-70 flex flex-col items-center justify-center gap-2">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-pacifica-orange"></div>
+                <p className="text-sm font-medium text-pacifica-slate">Loading PDF…</p>
+              </div>
             )}
           </div>
 
           <div className="p-2 text-center text-xs text-pacifica-slate">
-            {loading ? 'Rendering…' : current ? current.title : 'Select or add a PDF'}
+            {current ? current.title : 'Select or add a PDF to begin.'}
           </div>
         </div>
       </div>
@@ -2506,126 +2612,10 @@ function GradingInterface() {
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-12 items-start">
             <div className="space-y-6 xl:col-span-8">
               <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
-                <h2 className="text-lg font-semibold text-pacifica-navy mb-4">
-                  Student Progress ({Object.values(grades).filter(g => g.completed).length}/{students.length})
-                </h2>
-                <div className="space-y-3">
-                  {orderedStudents.map((student, idx) => {
-                    const sg = grades[student.id] || { scores: {}, comments: '', completed: false };
-                    const total = calculateTotal(sg);
-                    const colors = ['bg-pacifica-robin bg-opacity-20 text-pacifica-robin', 'bg-green-100 text-green-600', 'bg-pacifica-canary bg-opacity-30 text-pacifica-navy', 'bg-pacifica-tangerine bg-opacity-20 text-pacifica-tangerine'];
-                    const colorClass = colors[idx % 4];
-
-                    return (
-                      <div key={student.id} className={`border rounded-lg p-4 transition-all ${currentStudent === student.name ? 'border-pacifica-orange bg-pacifica-orange bg-opacity-5 shadow-md' : sg.completed ? 'border-green-300 bg-green-50' : 'border-pacifica-gray'}`}>
-                        <div className="flex items-start justify-between mb-3">
-                          <div className="flex items-center gap-3 min-w-0">
-                            <div className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold ${colorClass}`}>
-                              {getInitials(student.name)}
-                            </div>
-                            <div className="min-w-0">
-                              <p className="font-semibold text-pacifica-navy truncate">{student.name}</p>
-                              <p className="text-xs text-pacifica-slate truncate">ID: {student.studentId}</p>
-                            </div>
-                          </div>
-                          <div className="text-right">
-                            <p className={`text-2xl font-bold ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}>{sg.completed ? total : '--'}</p>
-                            <p className="text-xs text-pacifica-slate">{sg.completed ? `/${calculateMaxTotal()}` : 'Not Graded'}</p>
-                          </div>
-                        </div>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
-                          {rubricItems.map(item => {
-                            const isEditing = editingStudent === student.id && editingField === item.name;
-                            const score = sg.scores[item.name] ?? '';
-                            return (
-                              <div key={item.name} className="text-center p-2 bg-white rounded border border-pacifica-gray">
-                                <p className="text-xs text-pacifica-slate truncate mb-1">{item.name}</p>
-                                {isEditing ? (
-                                  <input
-                                    type="number"
-                                    value={score}
-                                    onChange={(e) => updateScore(student.id, item.name, parseInt(e.target.value) || 0)}
-                                    onBlur={() => { setEditingStudent(null); setEditingField(null); }}
-                                    onKeyDown={(e) => { if (e.key === 'Enter') { setEditingStudent(null); setEditingField(null); } }}
-                                    min="0"
-                                    max={item.maxPoints}
-                                    autoFocus
-                                    className="w-full text-lg font-semibold text-center border-2 border-pacifica-orange rounded px-1"
-                                  />
-                                ) : (
-                                  <p
-                                    onClick={() => { setEditingStudent(student.id); setEditingField(item.name); }}
-                                    className={`text-lg font-semibold cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-10 rounded px-1 ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}
-                                    title="Click to edit"
-                                  >
-                                    {sg.scores[item.name] ?? '--'}
-                                  </p>
-                                )}
-                                <p className="text-xs text-pacifica-slate">/ {item.maxPoints}</p>
-                              </div>
-                            );
-                          })}
-                        </div>
-                        <div className={`${sg.completed ? 'bg-pacifica-orange bg-opacity-10' : 'bg-pacifica-gray bg-opacity-20'} rounded p-3`}>
-                          <div className="flex items-center justify-between mb-1">
-                            <p className={`text-xs font-semibold ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-slate'}`}>Comments:</p>
-                            <button
-                              onClick={() => {
-                                if (editingStudent === student.id && editingField === 'comments') {
-                                  setEditingStudent(null); setEditingField(null);
-                                } else {
-                                  setEditingStudent(student.id); setEditingField('comments');
-                                }
-                              }}
-                              className="text-xs text-pacifica-orange hover:text-pacifica-tangerine font-medium"
-                            >
-                              {editingStudent === student.id && editingField === 'comments' ? 'Done' : 'Edit'}
-                            </button>
-                          </div>
-                          {editingStudent === student.id && editingField === 'comments' ? (
-                            <textarea
-                              value={sg.comments}
-                              onChange={(e) => updateComments(student.id, e.target.value)}
-                              onBlur={() => { setTimeout(() => { setEditingStudent(null); setEditingField(null); }, 200); }}
-                              rows={3}
-                              autoFocus
-                              className="w-full text-sm p-2 border-2 border-pacifica-orange rounded"
-                            />
-                          ) : (
-                            <p
-                              onClick={() => { setEditingStudent(student.id); setEditingField('comments'); }}
-                              className="text-sm text-pacifica-navy cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-10 rounded p-1"
-                              title="Click to edit"
-                            >
-                              {sg.comments || 'Click to add comments…'}
-                            </p>
-                          )}
-                        </div>
-                        {!sg.completed && (
-                          <button
-                            onClick={() => {
-                              setGrades(prev => ({
-                                ...prev,
-                                [student.id]: {
-                                  ...prev[student.id],
-                                  completed: true
-                                }
-                              }));
-                              bumpStudentDown(student.id);
-                            }}
-                            className="mt-3 w-full px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
-                          >
-                            Mark as Complete
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+                <h2 className="text-lg font-semibold text-pacifica-navy mb-4">PDFs</h2>
+                <InlinePDFPanel initialItems={[]} />
               </div>
-            </div>
 
-            <div className="space-y-6 xl:col-span-4">
               <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
                 <h2 className="text-lg font-semibold text-pacifica-navy mb-4">Recording Controls</h2>
                 <div className="flex flex-col items-center gap-4">
@@ -2681,27 +2671,6 @@ function GradingInterface() {
                       </p>
                     </div>
                   )}
-                </div>
-              </div>
-
-              <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
-                <h2 className="text-lg font-semibold text-pacifica-navy mb-4">PDFs</h2>
-                <InlinePDFPanel initialItems={[]} />
-              </div>
-
-              <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
-                <h2 className="text-lg font-semibold text-pacifica-navy mb-4">Rubric Reference</h2>
-                <div className="space-y-2">
-                  {rubricItems.map((item, idx) => (
-                    <div key={idx} className="flex justify-between">
-                      <span className="text-sm text-pacifica-slate">{item.name}</span>
-                      <span className="text-sm font-semibold text-pacifica-navy">/{item.maxPoints}</span>
-                    </div>
-                  ))}
-                  <div className="pt-2 border-t border-pacifica-gray flex justify-between">
-                    <span className="text-sm font-semibold text-pacifica-navy">Total</span>
-                    <span className="text-sm font-bold text-pacifica-orange">/{calculateMaxTotal()}</span>
-                  </div>
                 </div>
               </div>
 
@@ -2798,8 +2767,8 @@ function GradingInterface() {
                     <div className="flex justify-end gap-2 mt-4">
                       <button
                         onClick={() => {
-                          setShowManualTranscriptInput(false);
                           setManualTranscriptText('');
+                          setShowManualTranscriptInput(false);
                           setManualTranscriptError(null);
                         }}
                         className="btn btn-outline"
@@ -2835,10 +2804,10 @@ function GradingInterface() {
                     transcript.map((entry) => (
                       <div
                         key={entry.id}
-                        className={`p-3 rounded-lg border ${
+                        className={`${
                           entry.isProcessing
-                            ? 'bg-pacifica-canary bg-opacity-10 border-pacifica-canary animate-pulse'
-                            : 'bg-white border-pacifica-gray'
+                            ? 'p-3 rounded-lg border bg-pacifica-canary bg-opacity-10 border-pacifica-canary animate-pulse'
+                            : 'p-3 rounded-lg border bg-white border-pacifica-gray'
                         }`}
                       >
                         {entry.timestamp && (
@@ -2851,10 +2820,146 @@ function GradingInterface() {
                 </div>
               </div>
             </div>
+            <div className="xl:col-span-4">
+              <div className="space-y-6 xl:sticky xl:top-6">
+                <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6 flex flex-col max-h-[80vh]">
+                  <h2 className="text-lg font-semibold text-pacifica-navy">
+                    Student Progress ({Object.values(grades).filter(g => g.completed).length}/{students.length})
+                  </h2>
+                  <div className="mt-4 space-y-3 overflow-y-auto pr-1">
+                    {orderedStudents.map((student, idx) => {
+                      const sg = grades[student.id] || { scores: {}, comments: '', completed: false };
+                      const total = calculateTotal(sg);
+                      const colors = ['bg-pacifica-robin bg-opacity-20 text-pacifica-robin', 'bg-green-100 text-green-600', 'bg-pacifica-canary bg-opacity-30 text-pacifica-navy', 'bg-pacifica-tangerine bg-opacity-20 text-pacifica-tangerine'];
+                      const colorClass = colors[idx % 4];
 
+                      return (
+                        <div key={student.id} className={`border rounded-lg p-4 transition-all ${currentStudent === student.name ? 'border-pacifica-orange bg-pacifica-orange bg-opacity-5 shadow-md' : sg.completed ? 'border-green-300 bg-green-50' : 'border-pacifica-gray'}`}>
+                          <div className="flex items-start justify-between mb-3">
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold ${colorClass}`}>
+                                {getInitials(student.name)}
+                              </div>
+                              <div className="min-w-0">
+                                <p className="font-semibold text-pacifica-navy truncate">{student.name}</p>
+                                <p className="text-xs text-pacifica-slate truncate">ID: {student.studentId}</p>
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              <p className={`text-2xl font-bold ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}>{sg.completed ? total : '--'}</p>
+                              <p className="text-xs text-pacifica-slate">{sg.completed ? `/${calculateMaxTotal()}` : 'Not Graded'}</p>
+                            </div>
+                          </div>
 
+                          <div className="grid grid-cols-2 gap-2 mb-3">
+                            {rubricItems.map(item => {
+                              const isEditing = editingStudent === student.id && editingField === item.name;
+                              const score = sg.scores[item.name] ?? '';
+                              return (
+                                <div key={item.name} className="text-center p-2 bg-white rounded border border-pacifica-gray">
+                                  <p className="text-xs text-pacifica-slate truncate mb-1">{item.name}</p>
+                                  {isEditing ? (
+                                    <input
+                                      type="number"
+                                      value={score}
+                                      onChange={(e) => updateScore(student.id, item.name, parseInt(e.target.value) || 0)}
+                                      onBlur={() => { setEditingStudent(null); setEditingField(null); }}
+                                      onKeyDown={(e) => { if (e.key === 'Enter') { setEditingStudent(null); setEditingField(null); } }}
+                                      min="0"
+                                      max={item.maxPoints}
+                                      autoFocus
+                                      className="w-full text-lg font-semibold text-center border-2 border-pacifica-orange rounded px-1"
+                                    />
+                                  ) : (
+                                    <p
+                                      onClick={() => { setEditingStudent(student.id); setEditingField(item.name); }}
+                                      className={`text-lg font-semibold cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-10 rounded px-1 ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}
+                                    >
+                                      {sg.scores[item.name] ?? '--'}
+                                    </p>
+                                  )}
+                                  <p className="text-xs text-pacifica-slate">/ {item.maxPoints}</p>
+                                </div>
+                              );
+                            })}
+                          </div>
 
-          </div>
+                          <div className={`${sg.completed ? 'bg-pacifica-orange bg-opacity-10' : 'bg-pacifica-gray bg-opacity-20'} rounded p-3`}>
+                            <div className="flex items-center justify-between mb-1">
+                              <p className={`text-xs font-semibold ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-slate'}`}>Comments:</p>
+                              <button
+                                onClick={() => {
+                                  if (editingStudent === student.id && editingField === 'comments') {
+                                    setEditingStudent(null); setEditingField(null);
+                                  } else {
+                                    setEditingStudent(student.id); setEditingField('comments');
+                                  }
+                                }}
+                                className="text-xs text-pacifica-orange hover:text-pacifica-tangerine font-medium"
+                              >
+                                {editingStudent === student.id && editingField === 'comments' ? 'Done' : 'Edit'}
+                              </button>
+                            </div>
+                            {editingStudent === student.id && editingField === 'comments' ? (
+                              <textarea
+                                value={sg.comments}
+                                onChange={(e) => updateComments(student.id, e.target.value)}
+                                onBlur={() => { setTimeout(() => { setEditingStudent(null); setEditingField(null); }, 200); }}
+                                rows={3}
+                                autoFocus
+                                className="w-full text-sm p-2 border-2 border-pacifica-orange rounded"
+                              />
+                            ) : (
+                              <p
+                                onClick={() => { setEditingStudent(student.id); setEditingField('comments'); }}
+                                className="text-sm text-pacifica-navy cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-10 rounded p-1"
+                                title="Click to edit"
+                              >
+                                {sg.comments || 'Click to add comments…'}
+                              </p>
+                            )}
+                          </div>
+
+                          {!sg.completed && (
+                            <button
+                              onClick={() => {
+                                setGrades(prev => ({
+                                  ...prev,
+                                  [student.id]: {
+                                    ...prev[student.id],
+                                    completed: true
+                                  }
+                                }));
+                                bumpStudentDown(student.id);
+                              }}
+                              className="mt-3 w-full px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
+                            >
+                              Mark as Complete
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
+                  <h2 className="text-lg font-semibold text-pacifica-navy mb-4">Rubric Reference</h2>
+                  <div className="space-y-2">
+                    {rubricItems.map((item, idx) => (
+                      <div key={idx} className="flex justify-between">
+                        <span className="text-sm text-pacifica-slate">{item.name}</span>
+                        <span className="text-sm font-semibold text-pacifica-navy">/{item.maxPoints}</span>
+                      </div>
+                    ))}
+                    <div className="pt-2 border-t border-pacifica-gray flex justify-between">
+                      <span className="text-sm font-semibold text-pacifica-navy">Total</span>
+                      <span className="text-sm font-bold text-pacifica-orange">/{calculateMaxTotal()}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
         </div>
       </div>
     );
