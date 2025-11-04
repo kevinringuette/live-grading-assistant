@@ -42,11 +42,12 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <!-- PDF.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.js"></script>
   <script>
-    if (window['pdfjsLib']) {
-      pdfjsLib.GlobalWorkerOptions.workerSrc =
+    window.pdfjsLib = window['pdfjs-dist/build/pdf'] || window.pdfjsLib;
+    if (window.pdfjsLib) {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc =
         "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.js";
-      pdfjsLib.disableWorker = false;
     }
   </script>
   <style>
@@ -268,6 +269,7 @@ const CONFIG = {
   N8N_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook/voice-grader',
   N8N_TRANSCRIPT_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook/77f1b709-51b2-4d7f-9d99-b9c8bf063725',
   N8N_EMAIL_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook/80869e6a-5041-41e7-a35d-de6da27193e3',
+  PDF_PROXY_URL: 'https://kringuette0.app.n8n.cloud/webhook/pdf-proxy',
   TABLES: {
     TEACHERS: 'Teachers',
     SECTIONS: 'Master Sections',
@@ -367,128 +369,229 @@ function chunk(arr, size = 10) {
   return out;
 }
 
-const waitForPdfjsLib = () => {
-  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
-  return new Promise((resolve, reject) => {
-    let attempts = 0;
-    const timer = setInterval(() => {
-      attempts += 1;
-      if (window.pdfjsLib) {
-        clearInterval(timer);
-        resolve(window.pdfjsLib);
-      } else if (attempts > 100) {
-        clearInterval(timer);
-        reject(new Error('PDF.js failed to load'));
-      }
-    }, 100);
-  });
-};
-
-function PDFViewer({ item, page, onLoaded, onStatusChange }) {
+function InlinePDFPanel({ initialItems = [] }) {
+  const { useState, useEffect, useRef } = React;
+  const [items, setItems] = useState(initialItems);
+  const [currentIdx, setCurrentIdx] = useState(0);
+  const [pageNum, setPageNum] = useState(1);
+  const [pageCount, setPageCount] = useState(null);
+  const [scale, setScale] = useState(1.1);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
   const canvasRef = useRef(null);
-  const docRef = useRef(null);
-  const latestPageRef = useRef(page || 1);
+  const pdfRef = useRef(null);
 
-  const destroyDoc = useCallback(async () => {
-    const current = docRef.current;
-    docRef.current = null;
-    if (current && typeof current.destroy === 'function') {
-      try {
-        await current.destroy();
-      } catch (_) {}
+  const current = items[currentIdx];
+
+  const proxiedUrl = (rawUrl) => {
+    if (!rawUrl) return null;
+    if (rawUrl.startsWith('blob:')) return rawUrl;
+    if (!CONFIG.PDF_PROXY_URL) return rawUrl;
+    return `${CONFIG.PDF_PROXY_URL}?url=${encodeURIComponent(rawUrl)}`;
+  };
+
+  const loadPdf = async (src) => {
+    const lib = window.pdfjsLib;
+    if (!lib) {
+      setError('PDF.js is not available.');
+      return;
     }
-  }, []);
-
-  const renderPage = useCallback(async (doc, targetPage, signal) => {
-    if (!doc) return false;
-    const guard = signal || { cancelled: false };
+    setLoading(true);
+    setError(null);
+    setPageCount(null);
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
     try {
-      const total = doc.numPages || 0;
-      const safePage = Math.min(Math.max(1, targetPage || 1), Math.max(total, 1));
-      const pdfPage = await doc.getPage(safePage);
-      if (guard.cancelled) return false;
-      const viewport = pdfPage.getViewport({ scale: 1.4 });
-      const canvas = canvasRef.current;
-      if (!canvas) return false;
+      if (pdfRef.current?.destroy) {
+        try {
+          await pdfRef.current.destroy();
+        } catch (_) {}
+      }
+      let loadingTask;
+      if (src.startsWith('blob:')) {
+        const resp = await fetch(src);
+        const buf = await resp.arrayBuffer();
+        loadingTask = lib.getDocument({ data: new Uint8Array(buf) });
+      } else {
+        loadingTask = lib.getDocument({ url: proxiedUrl(src) });
+      }
+      const pdf = await loadingTask.promise;
+      pdfRef.current = pdf;
+      setPageCount(pdf.numPages);
+      setScale(1.1);
+      setPageNum(1);
+      await renderPage(1);
+    } catch (e) {
+      console.error('PDF load error:', e);
+      setError('Failed to load PDF. Try a different source or use a local file.');
+      pdfRef.current = null;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const renderPage = async (targetPage = pageNum) => {
+    const pdf = pdfRef.current;
+    const canvas = canvasRef.current;
+    if (!pdf || !canvas) return;
+    try {
+      setLoading(true);
+      const safePage = Math.min(Math.max(1, targetPage), pdf.numPages || 1);
+      const page = await pdf.getPage(safePage);
+      const viewport = page.getViewport({ scale });
       const ctx = canvas.getContext('2d');
       canvas.width = viewport.width;
       canvas.height = viewport.height;
-      await pdfPage.render({ canvasContext: ctx, viewport }).promise;
-      return true;
-    } catch (err) {
-      console.error('PDF page render error:', err);
-      onStatusChange?.(item?.id, 'error', err);
-      return false;
+      await page.render({ canvasContext: ctx, viewport }).promise;
+    } catch (e) {
+      console.error('Render error:', e);
+      setError('Failed to render this page.');
+    } finally {
+      setLoading(false);
     }
-  }, [onStatusChange, item?.id]);
+  };
 
   useEffect(() => {
-    latestPageRef.current = page || 1;
-    const doc = docRef.current;
-    if (!doc) return;
-
-    const signal = { cancelled: false };
-
-    renderPage(doc, latestPageRef.current, signal).then((success) => {
-      if (!signal.cancelled) {
-        onStatusChange?.(item?.id, success ? 'ready' : 'error');
-      }
-    });
-
-    return () => {
-      signal.cancelled = true;
-    };
-  }, [page, renderPage, onStatusChange, item?.id]);
+    if (current?.src) loadPdf(current.src);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentIdx, current?.src]);
 
   useEffect(() => {
-    if (!item || (!item.url && !item.data)) return;
+    renderPage(pageNum);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageNum, scale]);
 
-    const signal = { cancelled: false };
+  const addByUrl = () => {
+    const url = prompt('Paste a PDF URL (Drive OK; we proxy it).');
+    if (!url) return;
+    const title = prompt('Title for this PDF:') || `PDF ${items.length + 1}`;
+    setItems(prev => [...prev, { title, src: url, type: 'url' }]);
+    setCurrentIdx(items.length);
+  };
 
-    const loadDocument = async () => {
-      onStatusChange?.(item.id, 'loading');
-      let lib;
-      let prevDisable = null;
-      try {
-        lib = await waitForPdfjsLib();
-        const source = item.data
-          ? { data: item.data instanceof Uint8Array ? item.data : new Uint8Array(item.data) }
-          : { url: item.url };
-        prevDisable = lib.disableWorker;
-        lib.disableWorker = true;
-        const task = lib.getDocument(source);
-        const doc = await task.promise;
-        if (signal.cancelled) {
-          await doc.destroy?.();
-          return;
-        }
-        docRef.current = doc;
-        const totalPages = doc.numPages || 0;
-        onLoaded?.(item.id, totalPages);
-        const success = await renderPage(doc, latestPageRef.current, signal);
-        if (!signal.cancelled) {
-          onStatusChange?.(item.id, success ? 'ready' : 'error');
-        }
-      } catch (err) {
-        console.error('PDF render error:', err);
-        onStatusChange?.(item.id, 'error', err);
-        await destroyDoc();
-      } finally {
-        if (lib && prevDisable !== null) {
-          lib.disableWorker = prevDisable;
-        }
+  const onLocalFiles = (e) => {
+    const files = Array.from(e.target.files || []).filter(f => f.type === 'application/pdf');
+    if (!files.length) return;
+    const entries = files.map(f => ({
+      title: f.name.replace(/\.pdf$/i, ''),
+      src: URL.createObjectURL(f),
+      type: 'blob'
+    }));
+    setItems(prev => [...prev, ...entries]);
+    setCurrentIdx(items.length);
+    e.target.value = '';
+  };
+
+  const removeAt = (i) => {
+    const copy = [...items];
+    copy.splice(i, 1);
+    setItems(copy);
+    setCurrentIdx(idx => Math.max(0, Math.min(idx, copy.length - 1)));
+    if (copy.length === 0) {
+      pdfRef.current = null;
+      setPageCount(null);
+      setPageNum(1);
+      setError(null);
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
       }
-    };
+    }
+  };
 
-    loadDocument();
+  const canPrev = pageNum > 1;
+  const canNext = pageCount && pageNum < pageCount;
 
-    return () => {
-      signal.cancelled = true;
-      destroyDoc();
-    };
-  }, [item?.id, item?.url, item?.data, onLoaded, onStatusChange, destroyDoc, renderPage]);
+  return (
+    <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
+      <div className="xl:col-span-4">
+        <div className="flex items-center gap-2 mb-3">
+          <button onClick={addByUrl} className="btn btn-primary">Add by URL</button>
+          <label className="btn btn-outline cursor-pointer">
+            Open local
+            <input type="file" accept="application/pdf" multiple className="hidden" onChange={onLocalFiles} />
+          </label>
+        </div>
+        <ul className="space-y-2 max-h-[55vh] overflow-y-auto pr-1">
+          {items.map((p, i) => (
+            <li
+              key={i}
+              className={`rounded-md border p-3 ${i === currentIdx ? 'border-pacifica-orange bg-pacifica-orange/10' : 'border-pacifica-gray'}`}
+            >
+              <div className="flex items-start gap-2">
+                <button
+                  className="text-left flex-1 font-medium text-pacifica-navy hover:underline"
+                  onClick={() => setCurrentIdx(i)}
+                >
+                  {p.title}
+                </button>
+                <button
+                  className="text-pacifica-slate hover:text-pacifica-orange"
+                  onClick={() => removeAt(i)}
+                  title="Remove"
+                >
+                  ✕
+                </button>
+              </div>
+              <p className="text-xs text-pacifica-slate truncate mt-1">{p.src}</p>
+            </li>
+          ))}
+          {items.length === 0 && (
+            <p className="text-sm text-pacifica-slate italic">
+              No PDFs yet. Add one by URL or from your computer.
+            </p>
+          )}
+        </ul>
+        <p className="text-xs text-pacifica-slate mt-3">
+          Note: URLs are fetched via your proxy to avoid CORS (Google Drive is OK).
+        </p>
+      </div>
 
-  return <canvas ref={canvasRef} className="w-full h-auto border rounded bg-white" />;
+      <div className="xl:col-span-8">
+        <div className="border rounded-lg bg-white">
+          <div className="flex items-center justify-between p-3 border-b">
+            <div className="flex items-center gap-2">
+              <button className="btn btn-outline" disabled={!canPrev} onClick={() => setPageNum(p => Math.max(1, p - 1))}>Prev</button>
+              <div className="text-sm text-pacifica-slate">
+                Page {pageCount ? pageNum : '--'} / {pageCount ?? '--'}
+              </div>
+              <button
+                className="btn btn-outline"
+                disabled={!canNext}
+                onClick={() => setPageNum(p => {
+                  if (!pageCount) return p;
+                  return Math.min(pageCount, p + 1);
+                })}
+              >
+                Next
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <button className="btn btn-outline" onClick={() => setScale(s => Math.max(0.5, +(s - 0.1).toFixed(2)))}>-</button>
+              <span className="text-sm w-14 text-center">{Math.round(scale * 100)}%</span>
+              <button className="btn btn-outline" onClick={() => setScale(s => Math.min(3, +(s + 0.1).toFixed(2)))}>+</button>
+            </div>
+          </div>
+
+          <div className="min-h-[70vh] flex items-center justify-center bg-pacifica-gray bg-opacity-10">
+            {error ? (
+              <div className="p-4 text-red-700 text-sm">{error}</div>
+            ) : (
+              <canvas ref={canvasRef} className="bg-white shadow-sm rounded m-3"></canvas>
+            )}
+          </div>
+
+          <div className="p-2 text-center text-xs text-pacifica-slate">
+            {loading ? 'Rendering…' : current ? current.title : 'Select or add a PDF'}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function GradingInterface() {
@@ -522,189 +625,7 @@ function GradingInterface() {
   const [grades, setGrades] = useState({});
   const [currentStudent, setCurrentStudent] = useState(null);
 
-  // ===== PDF Workspace State =====
-  const [pdfItems, setPdfItems] = useState([]); // [{ id, fileName, url, data, studentId, studentName, pageCount, graded, status, error, _hidden }]
-  const [selectedPdfIdx, setSelectedPdfIdx] = useState(0);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [isPdfWorkspaceOpen, setIsPdfWorkspaceOpen] = useState(false);
-  const selectedPdf = useMemo(() => pdfItems[selectedPdfIdx] || null, [pdfItems, selectedPdfIdx]);
-
-  const parseNameFromFilename = (fileName) => {
-    if (!fileName) return '';
-    const base = fileName.replace(/\.[Pp][Dd][Ff]$/, '');
-    const cleaned = base
-      .replace(/[_-]+/g, ' ')
-      .replace(/([a-z])([A-Z])/g, '$1 $2')
-      .replace(/\s+/g, ' ')
-      .trim();
-    if (!cleaned) return '';
-    if (cleaned.includes(',')) {
-      const [last, first] = cleaned.split(',').map(s => s.trim());
-      const swapped = `${first} ${last}`.trim();
-      return swapped
-        .split(' ')
-        .filter(Boolean)
-        .map(part => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
-        .join(' ');
-    }
-
-    const tokens = cleaned.split(' ').filter(Boolean);
-    const stopWords = new Set(['hw', 'homework', 'classwork', 'quiz', 'test', 'assignment', 'sheet', 'work']);
-    const nameTokens = [];
-    for (const token of tokens) {
-      const lower = token.toLowerCase();
-      if (/\d/.test(token) || stopWords.has(lower)) break;
-      nameTokens.push(token);
-    }
-    const candidate = nameTokens.length ? nameTokens.join(' ') : cleaned;
-    return candidate
-      .split(' ')
-      .filter(Boolean)
-      .map(part => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
-      .join(' ')
-      .trim();
-  };
-
-  const norm = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
-
-  const matchStudentFromName = (rawName) => {
-    const n = norm(rawName);
-    if (!n) return null;
-    const tokens = n.split(' ').filter(Boolean);
-    const guesses = new Set([n]);
-    if (tokens.length >= 2) {
-      const firstLast = `${tokens[0]} ${tokens.slice(1).join(' ')}`.trim();
-      const lastFirst = `${tokens.slice(1).join(' ')} ${tokens[0]}`.trim();
-      if (firstLast) guesses.add(firstLast);
-      if (lastFirst) guesses.add(lastFirst);
-    }
-
-    for (const guess of guesses) {
-      const exact = students.find(s => norm(s.name) === guess);
-      if (exact) return exact;
-    }
-
-    for (const guess of guesses) {
-      const partial = students.find(s => {
-        const rn = norm(s.name);
-        return rn.startsWith(guess) || rn.endsWith(guess);
-      });
-      if (partial) return partial;
-    }
-
-    const last = tokens[tokens.length - 1];
-    if (!last) return null;
-    const lastHits = students.filter(s => norm(s.name).endsWith(` ${last}`));
-    return lastHits.length === 1 ? lastHits[0] : null;
-  };
-
-  useEffect(() => {
-    if (pdfItems.length === 0 && isPdfWorkspaceOpen) {
-      setIsPdfWorkspaceOpen(false);
-    }
-  }, [pdfItems.length, isPdfWorkspaceOpen]);
-
-  useEffect(() => {
-    if (pdfItems.length > 0 && selectedPdfIdx >= pdfItems.length) {
-      setSelectedPdfIdx(0);
-      setCurrentPage(1);
-    }
-  }, [pdfItems.length, selectedPdfIdx]);
-
-  const handleZipUpload = async (fileList) => {
-    const zips = Array.from(fileList || []);
-    if (zips.length === 0) return;
-
-    const newItems = [];
-    for (const zipFile of zips) {
-      try {
-        const zip = await JSZip.loadAsync(zipFile);
-        const entries = Object.values(zip.files).filter(f => !f.dir && /\.pdf$/i.test(f.name));
-
-        for (const entry of entries) {
-          try {
-            const raw = await entry.async('uint8array');
-            const data = raw instanceof Uint8Array ? new Uint8Array(raw) : new Uint8Array(raw.buffer);
-            const blob = new Blob([data], { type: 'application/pdf' });
-            const url = URL.createObjectURL(blob);
-            const filenameOnly = entry.name.split('/').pop();
-            const guessedName = parseNameFromFilename(filenameOnly);
-            const match = matchStudentFromName(guessedName);
-
-            newItems.push({
-              id: `${zipFile.name}:${entry.name}`,
-              fileName: filenameOnly,
-              url,
-              data,
-              studentId: match?.id || null,
-              studentName: match?.name || guessedName,
-              pageCount: null,
-              graded: !!(match && grades[match.id]?.completed),
-              status: 'idle',
-              error: null,
-              _hidden: false,
-            });
-          } catch (e) {
-            console.error('Failed to load PDF from zip:', entry.name, e);
-          }
-        }
-      } catch (e) {
-        console.error('Failed to parse zip:', zipFile.name, e);
-      }
-    }
-
-    newItems.sort((a, b) => (a.studentName || '').localeCompare(b.studentName || ''));
-    setPdfItems(prev => [...prev, ...newItems]);
-    setSelectedPdfIdx(0);
-    setCurrentPage(1);
-    setIsPdfWorkspaceOpen(true);
-  };
-
-  const handlePdfLoaded = useCallback((id, count) => {
-    if (!id) return;
-    setPdfItems(prev => prev.map(item => (
-      item.id === id ? { ...item, pageCount: count } : item
-    )));
-  }, []);
-
-  const handlePdfStatus = useCallback((id, status, detail) => {
-    if (!id) return;
-    setPdfItems(prev => prev.map(item => (
-      item.id === id
-        ? {
-            ...item,
-            status,
-            error: detail ? String(detail?.message || detail) : null,
-          }
-        : item
-    )));
-  }, []);
-
-  const getPdfStatusMeta = (status) => {
-    switch (status) {
-      case 'ready':
-        return { label: 'Ready', className: 'bg-green-100 text-green-700' };
-      case 'loading':
-        return { label: 'Loading…', className: 'bg-pacifica-canary/40 text-pacifica-navy' };
-      case 'error':
-        return { label: 'Error', className: 'bg-red-100 text-red-600' };
-      default:
-        return { label: 'Idle', className: 'bg-pacifica-gray/40 text-pacifica-navy' };
-    }
-  };
-
-  const gotoPrevPage = useCallback(() => {
-    setCurrentPage(p => Math.max(1, p - 1));
-  }, []);
-
-  const gotoNextPage = useCallback(() => {
-    const max = selectedPdf?.pageCount || 1;
-    setCurrentPage(p => Math.min(max, p + 1));
-  }, [selectedPdf]);
-
-  const showPdfWorkspace = pdfItems.length > 0;
-
-  const [transcript, setTranscript] = useState([]);
+    const [transcript, setTranscript] = useState([]);
   const [showManualTranscriptInput, setShowManualTranscriptInput] = useState(false);
   const [manualTranscriptText, setManualTranscriptText] = useState('');
   const [manualTranscriptError, setManualTranscriptError] = useState(null);
@@ -771,41 +692,6 @@ function GradingInterface() {
     window.addEventListener('keydown', handleKeyPress);
     return () => window.removeEventListener('keydown', handleKeyPress);
   }, [isRecording, isPaused, editingStudent, rubricItems, students, grades, selectedTeacher, selectedSections, assignmentName, sessionId]);
-
-  useEffect(() => {
-    const onKey = (e) => {
-      if (step !== 'grading' || !isPdfWorkspaceOpen || pdfItems.length === 0) return;
-      if (e.key === 'Escape') {
-        setIsPdfWorkspaceOpen(false);
-        return;
-      }
-      if (e.key === 'ArrowLeft') {
-        e.preventDefault();
-        gotoPrevPage();
-      }
-      if (e.key === 'ArrowRight') {
-        e.preventDefault();
-        gotoNextPage();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [step, gotoPrevPage, gotoNextPage, isPdfWorkspaceOpen, pdfItems.length]);
-
-  useEffect(() => {
-    setPdfItems(prev => prev.map(it => {
-      const done = it.studentId ? !!(grades[it.studentId]?.completed) : it.graded;
-      return { ...it, graded: done };
-    }));
-  }, [grades]);
-
-  useEffect(() => {
-    if (selectedPdf) {
-      setCurrentStudent(selectedPdf.studentName || null);
-    } else if (pdfItems.length === 0) {
-      setCurrentStudent(null);
-    }
-  }, [selectedPdf, pdfItems.length]);
 
   const airtableRequest = async (endpoint, options = {}) => {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${endpoint}`;
@@ -1588,11 +1474,7 @@ function GradingInterface() {
         email: s.email
       }));
 
-      const active = selectedPdf;
-      const activeStudent = active?.studentId ? {
-        id: active.studentId,
-        name: active.studentName
-      } : (currentStudent ? { id: null, name: currentStudent } : null);
+      const activeStudent = currentStudent ? { id: null, name: currentStudent } : null;
 
       const payload = {
         audio: {
@@ -2385,31 +2267,6 @@ function GradingInterface() {
             </div>
 
             <div className="mb-6">
-              <label className="block text-sm font-medium text-pacifica-navy mb-2">Upload ZIP of PDFs (optional)</label>
-              <div className="flex items-center gap-3">
-                <label className="btn btn-outline cursor-pointer">
-                  <Icon name="FileArchive" className="w-4 h-4" />
-                  Choose ZIP file(s)
-                  <input
-                    type="file"
-                    accept=".zip"
-                    multiple
-                    className="hidden"
-                    onChange={(e) => handleZipUpload(e.target.files)}
-                  />
-                </label>
-                <p className="text-sm text-pacifica-slate">
-                  Drop one or more ZIPs exported from the school interface. Filenames should contain the student name.
-                </p>
-              </div>
-              {pdfItems.length > 0 && (
-                <p className="mt-2 text-sm text-pacifica-slate">
-                  Loaded {pdfItems.length} PDFs. You can use them in the grading view.
-                </p>
-              )}
-            </div>
-
-            <div className="mb-6">
               <label className="block text-sm font-medium text-pacifica-navy mb-2">
                 Students in Selected Sections ({students.length} total)
               </label>
@@ -2646,64 +2503,6 @@ function GradingInterface() {
             )}
           </div>
 
-          {showPdfWorkspace && (
-            <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-4 mb-6">
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <div>
-                  <h3 className="text-lg font-semibold text-pacifica-navy">PDF Workspace</h3>
-                  <p className="text-sm text-pacifica-slate">
-                    Loaded {pdfItems.length} PDF{pdfItems.length === 1 ? '' : 's'} from ZIP upload.
-                  </p>
-                  {selectedPdf && (
-                    <p className="text-sm text-pacifica-navy mt-1">
-                      Active: <span className="font-semibold">{selectedPdf.studentName || '(Unmatched)'}</span>
-                      {selectedPdf.pageCount ? ` • Page ${currentPage}/${selectedPdf.pageCount}` : ''}
-                    </p>
-                  )}
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <label className="btn btn-outline cursor-pointer">
-                    <Icon name="FileArchive" className="w-4 h-4" />
-                    Add ZIP
-                    <input
-                      type="file"
-                      accept=".zip"
-                      multiple
-                      className="hidden"
-                      onChange={(e) => handleZipUpload(e.target.files)}
-                    />
-                  </label>
-                  <button
-                    onClick={() => setIsPdfWorkspaceOpen(true)}
-                    className="btn btn-primary"
-                  >
-                    <Icon name="FolderOpen" className="w-4 h-4" />
-                    Open Workspace
-                  </button>
-                </div>
-              </div>
-              {selectedPdf && (
-                <div className="mt-4 flex flex-wrap items-center gap-3 text-sm">
-                  <span className={`px-3 py-1 rounded-full font-semibold ${getPdfStatusMeta(selectedPdf.status).className}`}>
-                    {getPdfStatusMeta(selectedPdf.status).label}
-                  </span>
-                  <span className={`px-3 py-1 rounded-full font-semibold ${
-                    (selectedPdf.studentId && grades[selectedPdf.studentId]?.completed)
-                      ? 'bg-green-100 text-green-700'
-                      : 'bg-pacifica-gray/40 text-pacifica-navy'
-                  }`}>
-                    {(selectedPdf.studentId && grades[selectedPdf.studentId]?.completed) ? 'Graded' : 'Not Graded'}
-                  </span>
-                  {selectedPdf.error && (
-                    <span className="px-3 py-1 rounded-full bg-red-50 text-red-600">
-                      {selectedPdf.error}
-                    </span>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-12 items-start">
             <div className="space-y-6 xl:col-span-8">
               <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
@@ -2883,6 +2682,11 @@ function GradingInterface() {
                     </div>
                   )}
                 </div>
+              </div>
+
+              <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
+                <h2 className="text-lg font-semibold text-pacifica-navy mb-4">PDFs</h2>
+                <InlinePDFPanel initialItems={[]} />
               </div>
 
               <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
@@ -3375,208 +3179,6 @@ function GradingInterface() {
             </div>
           </div>
 
-          <div className="mt-6 bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
-            <h2 className="text-lg font-semibold text-pacifica-navy mb-4">Recording Segments ({recordingSegments.length})</h2>
-            {recordingSegments.length === 0 ? (
-              <p className="text-sm text-pacifica-gray italic">No recordings available.</p>
-            ) : (
-              <div>
-                <div className="flex items-center justify-between mb-4">
-                  <p className="text-sm text-pacifica-slate">{recordingSegments.length} recording(s) available for download</p>
-                  <button
-                    onClick={downloadAllRecordings}
-                    className="px-4 py-2 bg-pacifica-orange text-white rounded-lg hover:bg-pacifica-tangerine flex items-center gap-2"
-                  >
-                    <Icon name="download" className="w-4 h-4" />
-                    Download All as Zip
-                  </button>
-                </div>
-                <div className="grid grid-cols-4 gap-3">
-                  {recordingSegments.map((segment) => (
-                    <div
-                      key={segment.id}
-                      onClick={() => {
-                        const recording = completedRecordingsRef.current.find(r => r.id === segment.id);
-                        if (recording) downloadRecording(recording);
-                      }}
-                      className={`p-3 rounded-lg border cursor-pointer transition-all hover:shadow-md ${
-                        segment.status === 'completed' ? 'bg-green-50 border-green-300' :
-                        segment.status === 'processing' ? 'bg-pacifica-canary bg-opacity-20 border-pacifica-canary' :
-                        segment.status === 'error' ? 'bg-red-50 border-red-300' :
-                        'bg-pacifica-gray bg-opacity-20 border-pacifica-gray'
-                      }`}
-                      title="Click to download"
-                    >
-                      <div className="flex items-center gap-2">
-                        <Icon name="file-audio" className="w-4 h-4" />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-semibold truncate text-pacifica-navy">
-                            {segment.studentName || `Segment ${segment.chunkNumber}`}
-                          </p>
-                          <p className="text-xs text-pacifica-slate">
-                            {(segment.duration / 1000).toFixed(1)}s • {Math.round(segment.size / 1024)}KB
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="mt-6 bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
-            <h2 className="text-lg font-semibold text-pacifica-navy mb-4">
-              PDF Viewer
-            </h2>
-            <PDFViewerPanel initialPdfs={[]} />
-          </div>
-
-          {isPdfWorkspaceOpen && (
-            <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 sm:p-6">
-              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl h-full max-h-[90vh] flex flex-col">
-                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-pacifica-gray px-6 py-4">
-                  <div>
-                    <h2 className="text-xl font-semibold text-pacifica-navy">PDF Workspace</h2>
-                    <p className="text-sm text-pacifica-slate">Use ←/→ to change pages • Press ESC to close</p>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <label className="btn btn-outline cursor-pointer">
-                      <Icon name="FileArchive" className="w-4 h-4" />
-                      Add ZIP
-                      <input
-                        type="file"
-                        accept=".zip"
-                        multiple
-                        className="hidden"
-                        onChange={(e) => handleZipUpload(e.target.files)}
-                      />
-                    </label>
-                    <button
-                      onClick={() => setIsPdfWorkspaceOpen(false)}
-                      className="btn btn-outline"
-                    >
-                      <Icon name="X" className="w-4 h-4" />
-                      Close
-                    </button>
-                  </div>
-                </div>
-                <div className="flex flex-1 overflow-hidden">
-                  <div className="w-72 border-r border-pacifica-gray/60 bg-pacifica-gray bg-opacity-10 p-4 flex flex-col gap-3">
-                    <input
-                      type="text"
-                      placeholder="Search student or filename"
-                      className="w-full px-3 py-2 border rounded"
-                      onChange={(e) => {
-                        const q = norm(e.target.value);
-                        setPdfItems(prev => prev.map(it => ({
-                          ...it,
-                          _hidden: q ? !norm(it.studentName || it.fileName).includes(q) : false
-                        })));
-                      }}
-                    />
-                    <div className="flex-1 overflow-y-auto space-y-2 pr-1">
-                      {pdfItems.length === 0 ? (
-                        <p className="text-sm text-pacifica-slate italic">Upload ZIP files to begin.</p>
-                      ) : (
-                        pdfItems.map((it, idx) => {
-                          const statusMeta = getPdfStatusMeta(it.status);
-                          return (
-                            <button
-                              key={it.id}
-                              onClick={() => { setSelectedPdfIdx(idx); setCurrentPage(1); }}
-                              className={`w-full text-left p-3 border rounded-lg transition-all pop-in ${
-                                idx === selectedPdfIdx ? 'border-pacifica-orange bg-pacifica-orange/10 shadow-sm' : 'border-pacifica-gray bg-white'
-                              } ${it._hidden ? 'hidden' : ''}`}
-                            >
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="min-w-0">
-                                  <p className="font-semibold text-pacifica-navy truncate">{it.studentName || '(Unmatched)'}</p>
-                                  <p className="text-xs text-pacifica-slate truncate">{it.fileName}</p>
-                                </div>
-                                <div className="flex flex-col items-end gap-1 text-xs">
-                                  <span className={`px-2 py-0.5 rounded-full font-semibold ${statusMeta.className}`}>
-                                    {statusMeta.label}
-                                  </span>
-                                  <span className={`px-2 py-0.5 rounded-full ${
-                                    (it.studentId && grades[it.studentId]?.completed)
-                                      ? 'bg-green-100 text-green-700'
-                                      : 'bg-pacifica-gray/40 text-pacifica-navy'
-                                  }`}>
-                                    {(it.studentId && grades[it.studentId]?.completed) ? 'Graded' : 'Pending'}
-                                  </span>
-                                </div>
-                              </div>
-                            </button>
-                          );
-                        })
-                      )}
-                    </div>
-                  </div>
-                  <div className="flex-1 flex flex-col p-4 gap-4">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <p className="text-lg font-semibold text-pacifica-navy">
-                          {selectedPdf ? selectedPdf.studentName || '(Unmatched)' : 'Select a PDF to begin'}
-                        </p>
-                        {selectedPdf && (
-                          <p className="text-sm text-pacifica-slate truncate">{selectedPdf.fileName}</p>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          className="btn btn-outline"
-                          onClick={gotoPrevPage}
-                          disabled={!selectedPdf}
-                        >
-                          <Icon name="ChevronLeft" className="w-4 h-4" /> Prev
-                        </button>
-                        <button
-                          className="btn btn-outline"
-                          onClick={gotoNextPage}
-                          disabled={!selectedPdf}
-                        >
-                          Next <Icon name="ChevronRight" className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </div>
-                    {selectedPdf && (
-                      <div className="flex flex-wrap items-center gap-2 text-sm">
-                        <span className={`px-3 py-1 rounded-full font-semibold ${getPdfStatusMeta(selectedPdf.status).className}`}>
-                          {getPdfStatusMeta(selectedPdf.status).label}
-                        </span>
-                        {selectedPdf.pageCount && (
-                          <span className="px-3 py-1 rounded-full bg-pacifica-gray/30 text-pacifica-navy font-semibold">
-                            Page {currentPage} of {selectedPdf.pageCount}
-                          </span>
-                        )}
-                        {selectedPdf.error && (
-                          <span className="px-3 py-1 rounded-full bg-red-50 text-red-600">
-                            {selectedPdf.error}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                    <div className="flex-1 border border-pacifica-gray rounded-lg bg-pacifica-gray bg-opacity-10 flex items-center justify-center overflow-hidden">
-                      {selectedPdf ? (
-                        <PDFViewer
-                          item={selectedPdf}
-                          page={currentPage}
-                          onLoaded={handlePdfLoaded}
-                          onStatusChange={handlePdfStatus}
-                        />
-                      ) : (
-                        <p className="text-sm text-pacifica-slate">Select a PDF from the list on the left.</p>
-                      )}
-                    </div>
-                    <div className="text-xs text-pacifica-slate bg-pacifica-gray bg-opacity-10 rounded-lg px-3 py-2">
-                      Select a PDF, review pages, and press <strong>SPACE</strong> while recording to tag segments with the active student.
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       </div>
     );
@@ -3606,116 +3208,6 @@ function GradingInterface() {
         >
           Return to Start
         </button>
-      </div>
-    </div>
-  );
-}
-
-function PDFViewerPanel({ initialPdfs = [] }) {
-  const { useState, useCallback } = React;
-  const [pdfs, setPdfs] = useState(initialPdfs);
-  const [currentIndex, setCurrentIndex] = useState(0);
-
-  const buildViewerUrl = (pdfUrl) => {
-    const base = "https://mozilla.github.io/pdf.js/web/viewer.html?file=";
-    return base + encodeURIComponent(pdfUrl);
-  };
-
-  const addByUrl = useCallback(() => {
-    const url = prompt("Paste a PDF URL (must allow CORS):");
-    if (!url) return;
-    const title = prompt("Title for this PDF:") || `PDF ${pdfs.length + 1}`;
-    setPdfs((prev) => [...prev, { title, url }]);
-    setCurrentIndex(pdfs.length);
-  }, [pdfs]);
-
-  const onLocalFiles = useCallback((e) => {
-    const files = Array.from(e.target.files || []).filter(f => f.type === "application/pdf");
-    if (!files.length) return;
-    const entries = files.map(f => ({ title: f.name, url: URL.createObjectURL(f) }));
-    setPdfs(prev => [...prev, ...entries]);
-    setCurrentIndex(pdfs.length);
-    e.target.value = "";
-  }, [pdfs]);
-
-  const removeAt = (i) => {
-    const copy = [...pdfs];
-    copy.splice(i, 1);
-    setPdfs(copy);
-    setCurrentIndex((idx) => Math.max(0, Math.min(idx, copy.length - 1)));
-  };
-
-  const current = pdfs[currentIndex];
-
-  return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-      <div className="lg:col-span-4 xl:col-span-3">
-        <div className="flex items-center gap-2 mb-2">
-          <button onClick={addByUrl} className="btn btn-primary">
-            Add by URL
-          </button>
-          <label className="btn btn-outline cursor-pointer">
-            Open local
-            <input
-              type="file"
-              accept="application/pdf"
-              multiple
-              className="hidden"
-              onChange={onLocalFiles}
-            />
-          </label>
-        </div>
-        <ul className="space-y-2 max-h-[65vh] overflow-y-auto pr-1">
-          {pdfs.map((p, i) => (
-            <li
-              key={i}
-              className={`rounded-md border p-3 ${i === currentIndex ? "border-pacifica-orange bg-pacifica-orange/10" : "border-pacifica-gray"}`}
-            >
-              <div className="flex items-start gap-2">
-                <button
-                  className="text-left flex-1 font-medium text-pacifica-navy hover:underline"
-                  onClick={() => setCurrentIndex(i)}
-                >
-                  {p.title}
-                </button>
-                <button
-                  className="text-pacifica-slate hover:text-pacifica-orange"
-                  onClick={() => removeAt(i)}
-                  title="Remove"
-                >
-                  ✕
-                </button>
-              </div>
-              <p className="text-xs text-pacifica-slate truncate mt-1">{p.url}</p>
-            </li>
-          ))}
-          {pdfs.length === 0 && (
-            <p className="text-sm text-pacifica-slate italic">
-              No PDFs yet. Add one by URL or from your computer.
-            </p>
-          )}
-        </ul>
-        <p className="text-xs text-pacifica-slate mt-3">
-          Tip: For Google Drive, use <code>https://drive.google.com/uc?export=download&id=FILE_ID</code>
-        </p>
-      </div>
-
-      <div className="lg:col-span-8 xl:col-span-9">
-        <div className="border rounded-lg overflow-hidden bg-white min-h-[70vh]">
-          {current?.url ? (
-            <iframe
-              key={current.url}
-              title="PDF Viewer"
-              src={buildViewerUrl(current.url)}
-              className="w-full h-[75vh]"
-              style={{ border: "0" }}
-            />
-          ) : (
-            <div className="p-8 text-center text-pacifica-slate">
-              Select or add a PDF to view.
-            </div>
-          )}
-        </div>
       </div>
     </div>
   );
