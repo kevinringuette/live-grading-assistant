@@ -376,7 +376,12 @@ function PDFViewer({ item, page, onLoaded }) {
 
     const lib = window.pdfjsLib;
     const sources = [];
-    if (item.data) sources.push({ data: item.data });
+    if (item.data) {
+      const typed = item.data instanceof Uint8Array
+        ? item.data
+        : new Uint8Array(item.data);
+      sources.push({ data: typed });
+    }
     if (item.url) sources.push(item.url);
     if (sources.length === 0) return;
 
@@ -562,9 +567,9 @@ function GradingInterface() {
 
         for (const entry of entries) {
           try {
-            const data = await entry.async('uint8array');
-            const arrayBuffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-            const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
+            const raw = await entry.async('uint8array');
+            const data = raw instanceof Uint8Array ? new Uint8Array(raw) : new Uint8Array(raw.buffer);
+            const blob = new Blob([data], { type: 'application/pdf' });
             const url = URL.createObjectURL(blob);
             const filenameOnly = entry.name.split('/').pop();
             const guessedName = parseNameFromFilename(filenameOnly);
@@ -574,7 +579,7 @@ function GradingInterface() {
               id: `${zipFile.name}:${entry.name}`,
               fileName: filenameOnly,
               url,
-              data: arrayBuffer,
+              data,
               studentId: match?.id || null,
               studentName: match?.name || guessedName,
               pageCount: null,
