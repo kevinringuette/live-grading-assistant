@@ -307,16 +307,29 @@ const Icon = ({ name, className = "w-5 h-5" }) => {
       const luc = window.lucide;
       if (!luc || !luc.icons) return;
       const resolved = resolveIconName(name);
-      const icon = luc.icons[resolved];
-      if (!icon) {
+      const iconNode = luc.icons[resolved];
+      if (!iconNode) {
         if (ref.current) ref.current.innerHTML = "";
         return;
       }
       try {
-        const svg = icon.toSvg({ class: className });
-        if (ref.current) ref.current.innerHTML = svg;
+        if (typeof iconNode?.toSvg === 'function') {
+          const svg = iconNode.toSvg({ class: className });
+          if (ref.current) ref.current.innerHTML = svg;
+          return;
+        }
+        if (typeof luc.createElement === 'function') {
+          const svgEl = luc.createElement(iconNode, { class: className });
+          if (ref.current) {
+            ref.current.innerHTML = "";
+            ref.current.appendChild(svgEl);
+          }
+          return;
+        }
+        if (ref.current) ref.current.innerHTML = "";
       } catch (err) {
         console.error('Error rendering icon:', name, err);
+        if (ref.current) ref.current.innerHTML = "";
       }
     };
 
@@ -358,36 +371,76 @@ function PDFViewer({ item, page, onLoaded }) {
   const canvasRef = useRef(null);
 
   useEffect(() => {
-    let pdfDoc;
+    if (!window.pdfjsLib) return;
+    if (!item || (!item.url && !item.data)) return;
+
+    const lib = window.pdfjsLib;
+    const sources = [];
+    if (item.data) sources.push({ data: item.data });
+    if (item.url) sources.push(item.url);
+    if (sources.length === 0) return;
+
     let cancelled = false;
-    (async () => {
+    let pdfDoc = null;
+
+    const renderAttempt = async (source, enableWorker) => {
+      const previousDisable = lib.disableWorker;
+      lib.disableWorker = !enableWorker;
+      let loadingTask;
       try {
-        if (!window.pdfjsLib || (!item?.url && !item?.data)) return;
-        const source = item?.data ? { data: item.data } : item?.url;
-        const loadingTask = window.pdfjsLib.getDocument(source);
-        pdfDoc = await loadingTask.promise;
-        if (cancelled) return;
-
-        onLoaded?.(item?.id, pdfDoc.numPages);
-
-        const clamped = Math.min(Math.max(1, page), pdfDoc.numPages);
-        const pdfPage = await pdfDoc.getPage(clamped);
+        loadingTask = lib.getDocument(source);
+        const doc = await loadingTask.promise;
+        if (cancelled) {
+          await doc.destroy?.();
+          return false;
+        }
+        pdfDoc = doc;
+        const totalPages = doc.numPages;
+        onLoaded?.(item.id, totalPages);
+        const clamped = Math.min(Math.max(1, page), totalPages);
+        const pdfPage = await doc.getPage(clamped);
         const viewport = pdfPage.getViewport({ scale: 1.4 });
         const canvas = canvasRef.current;
-        if (!canvas) return;
+        if (!canvas) return true;
         const ctx = canvas.getContext('2d');
         canvas.width = viewport.width;
         canvas.height = viewport.height;
         await pdfPage.render({ canvasContext: ctx, viewport }).promise;
-      } catch (e) {
-        console.error('PDF render error:', e);
+        return true;
+      } catch (err) {
+        console.error('PDF render attempt failed:', err);
+        if (loadingTask && typeof loadingTask.destroy === 'function') {
+          try { loadingTask.destroy(); } catch (_) {}
+        }
+        if (pdfDoc && typeof pdfDoc.destroy === 'function') {
+          try { pdfDoc.destroy(); } catch (_) {}
+        }
+        pdfDoc = null;
+        return false;
+      } finally {
+        lib.disableWorker = previousDisable;
+      }
+    };
+
+    (async () => {
+      for (const source of sources) {
+        if (cancelled) break;
+        if (await renderAttempt(source, true)) return;
+        if (cancelled) break;
+        if (await renderAttempt(source, false)) return;
+      }
+      if (!cancelled) {
+        console.error('PDF render error: all attempts failed for', item?.fileName || item?.id);
       }
     })();
+
     return () => {
       cancelled = true;
-      if (pdfDoc?.destroy) pdfDoc.destroy();
+      if (pdfDoc && typeof pdfDoc.destroy === 'function') {
+        try { pdfDoc.destroy(); } catch (_) {}
+      }
     };
-  }, [item?.url, item?.id, page, onLoaded]);
+  }, [item?.id, item?.url, item?.data, page, onLoaded]);
 
   return <canvas ref={canvasRef} className="w-full h-auto border rounded" />;
 }
@@ -510,7 +563,8 @@ function GradingInterface() {
         for (const entry of entries) {
           try {
             const data = await entry.async('uint8array');
-            const blob = new Blob([data], { type: 'application/pdf' });
+            const arrayBuffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+            const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
             const url = URL.createObjectURL(blob);
             const filenameOnly = entry.name.split('/').pop();
             const guessedName = parseNameFromFilename(filenameOnly);
@@ -520,7 +574,7 @@ function GradingInterface() {
               id: `${zipFile.name}:${entry.name}`,
               fileName: filenameOnly,
               url,
-              data,
+              data: arrayBuffer,
               studentId: match?.id || null,
               studentName: match?.name || guessedName,
               pageCount: null,
