@@ -40,9 +40,8 @@
   </script>
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-  <!-- PDF.js (ESM + nomodule fallback) -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs" type="module"></script>
-  <script nomodule src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.js"></script>
+  <!-- PDF.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.js"></script>
   <script>
     if (window['pdfjsLib']) {
       pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -202,7 +201,7 @@
 <div id="root"></div>
 
 <script type="text/babel" data-presets="env,react">
-const { useState, useEffect, useRef, useMemo } = React;
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
 const WEBHOOK_TIMEOUT_MINUTES = 10;
 const WEBHOOK_TIMEOUT_MS = WEBHOOK_TIMEOUT_MINUTES * 60 * 1000;
@@ -367,7 +366,7 @@ function PDFViewer({ item, page, onLoaded }) {
         pdfDoc = await loadingTask.promise;
         if (cancelled) return;
 
-        onLoaded?.(pdfDoc.numPages);
+        onLoaded?.(item?.id, pdfDoc.numPages);
 
         const clamped = Math.min(Math.max(1, page), pdfDoc.numPages);
         const pdfPage = await pdfDoc.getPage(clamped);
@@ -386,7 +385,7 @@ function PDFViewer({ item, page, onLoaded }) {
       cancelled = true;
       if (pdfDoc?.destroy) pdfDoc.destroy();
     };
-  }, [item?.url, page, onLoaded]);
+  }, [item?.url, item?.id, page, onLoaded]);
 
   return <canvas ref={canvasRef} className="w-full h-auto border rounded" />;
 }
@@ -428,28 +427,70 @@ function GradingInterface() {
   const [currentPage, setCurrentPage] = useState(1);
 
   const parseNameFromFilename = (fileName) => {
+    if (!fileName) return '';
     const base = fileName.replace(/\.[Pp][Dd][Ff]$/, '');
-    const cleaned = base.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const cleaned = base
+      .replace(/[_-]+/g, ' ')
+      .replace(/([a-z])([A-Z])/g, '$1 $2')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!cleaned) return '';
     if (cleaned.includes(',')) {
       const [last, first] = cleaned.split(',').map(s => s.trim());
-      return `${first} ${last}`.trim();
+      const swapped = `${first} ${last}`.trim();
+      return swapped
+        .split(' ')
+        .filter(Boolean)
+        .map(part => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+        .join(' ');
     }
-    return cleaned;
+
+    const tokens = cleaned.split(' ').filter(Boolean);
+    const stopWords = new Set(['hw', 'homework', 'classwork', 'quiz', 'test', 'assignment', 'sheet', 'work']);
+    const nameTokens = [];
+    for (const token of tokens) {
+      const lower = token.toLowerCase();
+      if (/\d/.test(token) || stopWords.has(lower)) break;
+      nameTokens.push(token);
+    }
+    const candidate = nameTokens.length ? nameTokens.join(' ') : cleaned;
+    return candidate
+      .split(' ')
+      .filter(Boolean)
+      .map(part => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+      .join(' ')
+      .trim();
   };
 
   const norm = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
 
   const matchStudentFromName = (rawName) => {
     const n = norm(rawName);
-    let hit = students.find(s => norm(s.name) === n);
-    if (hit) return hit;
-    hit = students.find(s => {
-      const rn = norm(s.name);
-      return rn.startsWith(n) || rn.endsWith(n);
-    });
-    if (hit) return hit;
-    const parts = n.split(' ');
-    const last = parts[parts.length - 1];
+    if (!n) return null;
+    const tokens = n.split(' ').filter(Boolean);
+    const guesses = new Set([n]);
+    if (tokens.length >= 2) {
+      const firstLast = `${tokens[0]} ${tokens.slice(1).join(' ')}`.trim();
+      const lastFirst = `${tokens.slice(1).join(' ')} ${tokens[0]}`.trim();
+      if (firstLast) guesses.add(firstLast);
+      if (lastFirst) guesses.add(lastFirst);
+    }
+
+    for (const guess of guesses) {
+      const exact = students.find(s => norm(s.name) === guess);
+      if (exact) return exact;
+    }
+
+    for (const guess of guesses) {
+      const partial = students.find(s => {
+        const rn = norm(s.name);
+        return rn.startsWith(guess) || rn.endsWith(guess);
+      });
+      if (partial) return partial;
+    }
+
+    const last = tokens[tokens.length - 1];
+    if (!last) return null;
     const lastHits = students.filter(s => norm(s.name).endsWith(` ${last}`));
     return lastHits.length === 1 ? lastHits[0] : null;
   };
@@ -497,19 +538,23 @@ function GradingInterface() {
     setCurrentPage(1);
   };
 
-  const handlePdfLoaded = (idx, count) => {
-    setPdfItems(prev => {
-      const copy = [...prev];
-      if (copy[idx]) copy[idx] = { ...copy[idx], pageCount: count };
-      return copy;
-    });
-  };
+  const handlePdfLoaded = useCallback((id, count) => {
+    if (!id) return;
+    setPdfItems(prev => prev.map(item => (
+      item.id === id ? { ...item, pageCount: count } : item
+    )));
+  }, []);
 
-  const gotoPrevPage = () => setCurrentPage(p => Math.max(1, p - 1));
-  const gotoNextPage = () => {
+  const gotoPrevPage = useCallback(() => {
+    setCurrentPage(p => Math.max(1, p - 1));
+  }, []);
+
+  const gotoNextPage = useCallback(() => {
     const max = pdfItems[selectedPdfIdx]?.pageCount || 1;
     setCurrentPage(p => Math.min(max, p + 1));
-  };
+  }, [pdfItems, selectedPdfIdx]);
+
+  const showPdfWorkspace = pdfItems.length > 0;
 
   const [transcript, setTranscript] = useState([]);
   const [showManualTranscriptInput, setShowManualTranscriptInput] = useState(false);
@@ -2447,12 +2492,11 @@ function GradingInterface() {
             )}
           </div>
 
-          {pdfItems.length > 0 && (
-            <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-4 mb-6">
-              <div className="grid grid-cols-12 gap-4">
-                {/* LEFT: PDF list */}
-                <div className="col-span-12 md:col-span-3">
-                  <div className="flex items-center justify-between mb-2">
+          <div className={`grid grid-cols-1 gap-6 ${showPdfWorkspace ? 'xl:grid-cols-12 items-start' : 'lg:grid-cols-3'}`}>
+            {showPdfWorkspace && (
+              <div className="space-y-4 xl:col-span-3">
+                <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-4">
+                  <div className="flex items-center justify-between mb-3">
                     <h3 className="text-lg font-semibold text-pacifica-navy">PDFs ({pdfItems.length})</h3>
                     <label className="btn btn-outline cursor-pointer">
                       <Icon name="FileArchive" className="w-4 h-4" />
@@ -2478,7 +2522,7 @@ function GradingInterface() {
                       })));
                     }}
                   />
-                  <div className="space-y-2 max-h-[60vh] overflow-y-auto">
+                  <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1">
                     {pdfItems.map((it, idx) => (
                       <button
                         key={it.id}
@@ -2506,10 +2550,21 @@ function GradingInterface() {
                     ))}
                   </div>
                 </div>
+                <div className="p-4 border border-pacifica-gray rounded-lg bg-white shadow-sm text-sm">
+                  <p className="font-semibold text-pacifica-navy mb-2">Tip</p>
+                  <p className="text-pacifica-slate">
+                    Select a PDF → speak → press <strong>SPACE</strong> to send a segment.
+                    The app tags the segment with the selected student.
+                  </p>
+                </div>
+              </div>
+            )}
 
-                {/* CENTER: PDF viewer */}
-                <div className="col-span-12 md:col-span-6">
-                  <div className="flex items-center justify-between mb-2">
+
+            <div className={`${showPdfWorkspace ? 'space-y-6 xl:col-span-5' : 'space-y-6 lg:col-span-2'}`}>
+              {showPdfWorkspace && (
+                <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
                     <div className="text-sm text-pacifica-slate">
                       {pdfItems[selectedPdfIdx]?.studentName || '(Unmatched)'}
                       {pdfItems[selectedPdfIdx]?.pageCount ? ` • Page ${currentPage}/${pdfItems[selectedPdfIdx].pageCount}` : ''}
@@ -2523,31 +2578,137 @@ function GradingInterface() {
                       </button>
                     </div>
                   </div>
-                  <div className="border rounded overflow-hidden">
+                  <div className="border rounded overflow-hidden bg-pacifica-gray/10">
                     <PDFViewer
                       item={pdfItems[selectedPdfIdx]}
                       page={currentPage}
-                      onLoaded={(count) => handlePdfLoaded(selectedPdfIdx, count)}
+                      onLoaded={handlePdfLoaded}
                     />
                   </div>
                 </div>
+              )}
 
-                {/* RIGHT: lightweight help panel */}
-                <div className="col-span-12 md:col-span-3">
-                  <div className="p-3 border rounded bg-pacifica-gray/10 text-sm">
-                    <p className="font-semibold text-pacifica-navy mb-2">Tip</p>
-                    <p className="text-pacifica-slate">
-                      Select a PDF → speak → press <strong>SPACE</strong> to send a segment.
-                      The app tags the segment with the selected student.
-                    </p>
-                  </div>
+              <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
+                <h2 className="text-lg font-semibold text-pacifica-navy mb-4">
+                  Student Progress ({Object.values(grades).filter(g => g.completed).length}/{students.length})
+                </h2>
+                <div className="space-y-3">
+                  {orderedStudents.map((student, idx) => {
+                    const sg = grades[student.id] || { scores: {}, comments: '', completed: false };
+                    const total = calculateTotal(sg);
+                    const colors = ['bg-pacifica-robin bg-opacity-20 text-pacifica-robin', 'bg-green-100 text-green-600', 'bg-pacifica-canary bg-opacity-30 text-pacifica-navy', 'bg-pacifica-tangerine bg-opacity-20 text-pacifica-tangerine'];
+                    const colorClass = colors[idx % 4];
+
+                    return (
+                      <div key={student.id} className={`border rounded-lg p-4 transition-all ${currentStudent === student.name ? 'border-pacifica-orange bg-pacifica-orange bg-opacity-5 shadow-md' : sg.completed ? 'border-green-300 bg-green-50' : 'border-pacifica-gray'}`}>
+                        <div className="flex items-start justify-between mb-3">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold ${colorClass}`}>
+                              {getInitials(student.name)}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="font-semibold text-pacifica-navy truncate">{student.name}</p>
+                              <p className="text-xs text-pacifica-slate truncate">ID: {student.studentId}</p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className={`text-2xl font-bold ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}>{sg.completed ? total : '--'}</p>
+                            <p className="text-xs text-pacifica-slate">{sg.completed ? `/${calculateMaxTotal()}` : 'Not Graded'}</p>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+                          {rubricItems.map(item => {
+                            const isEditing = editingStudent === student.id && editingField === item.name;
+                            const score = sg.scores[item.name] ?? '';
+                            return (
+                              <div key={item.name} className="text-center p-2 bg-white rounded border border-pacifica-gray">
+                                <p className="text-xs text-pacifica-slate truncate mb-1">{item.name}</p>
+                                {isEditing ? (
+                                  <input
+                                    type="number"
+                                    value={score}
+                                    onChange={(e) => updateScore(student.id, item.name, parseInt(e.target.value) || 0)}
+                                    onBlur={() => { setEditingStudent(null); setEditingField(null); }}
+                                    onKeyDown={(e) => { if (e.key === 'Enter') { setEditingStudent(null); setEditingField(null); } }}
+                                    min="0"
+                                    max={item.maxPoints}
+                                    autoFocus
+                                    className="w-full text-lg font-semibold text-center border-2 border-pacifica-orange rounded px-1"
+                                  />
+                                ) : (
+                                  <p
+                                    onClick={() => { setEditingStudent(student.id); setEditingField(item.name); }}
+                                    className={`text-lg font-semibold cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-10 rounded px-1 ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}
+                                    title="Click to edit"
+                                  >
+                                    {sg.scores[item.name] ?? '--'}
+                                  </p>
+                                )}
+                                <p className="text-xs text-pacifica-slate">/ {item.maxPoints}</p>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div className={`${sg.completed ? 'bg-pacifica-orange bg-opacity-10' : 'bg-pacifica-gray bg-opacity-20'} rounded p-3`}>
+                          <div className="flex items-center justify-between mb-1">
+                            <p className={`text-xs font-semibold ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-slate'}`}>Comments:</p>
+                            <button
+                              onClick={() => {
+                                if (editingStudent === student.id && editingField === 'comments') {
+                                  setEditingStudent(null); setEditingField(null);
+                                } else {
+                                  setEditingStudent(student.id); setEditingField('comments');
+                                }
+                              }}
+                              className="text-xs text-pacifica-orange hover:text-pacifica-tangerine font-medium"
+                            >
+                              {editingStudent === student.id && editingField === 'comments' ? 'Done' : 'Edit'}
+                            </button>
+                          </div>
+                          {editingStudent === student.id && editingField === 'comments' ? (
+                            <textarea
+                              value={sg.comments}
+                              onChange={(e) => updateComments(student.id, e.target.value)}
+                              onBlur={() => { setTimeout(() => { setEditingStudent(null); setEditingField(null); }, 200); }}
+                              rows={3}
+                              autoFocus
+                              className="w-full text-sm p-2 border-2 border-pacifica-orange rounded"
+                            />
+                          ) : (
+                            <p
+                              onClick={() => { setEditingStudent(student.id); setEditingField('comments'); }}
+                              className="text-sm text-pacifica-navy cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-10 rounded p-1"
+                              title="Click to edit"
+                            >
+                              {sg.comments || 'Click to add comments…'}
+                            </p>
+                          )}
+                        </div>
+                        {!sg.completed && (
+                          <button
+                            onClick={() => {
+                              setGrades(prev => ({
+                                ...prev,
+                                [student.id]: {
+                                  ...prev[student.id],
+                                  completed: true
+                                }
+                              }));
+                              bumpStudentDown(student.id);
+                            }}
+                            className="mt-3 w-full px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
+                          >
+                            Mark as Complete
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             </div>
-          )}
 
-          <div className="grid grid-cols-3 gap-6">
-            <div className="space-y-6">
+            <div className={`${showPdfWorkspace ? 'space-y-6 xl:col-span-4' : 'space-y-6 lg:col-span-1'}`}>
               <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
                 <h2 className="text-lg font-semibold text-pacifica-navy mb-4">Recording Controls</h2>
                 <div className="flex flex-col items-center gap-4">
@@ -2750,11 +2911,11 @@ function GradingInterface() {
                     <p className="text-pacifica-gray italic">{isRecording ? 'Press SPACEBAR to process...' : 'Start recording'}</p>
                   ) : (
                     transcript.map((entry) => (
-                      <div 
-                        key={entry.id} 
+                      <div
+                        key={entry.id}
                         className={`p-3 rounded-lg border ${
-                          entry.isProcessing 
-                            ? 'bg-pacifica-canary bg-opacity-10 border-pacifica-canary animate-pulse' 
+                          entry.isProcessing
+                            ? 'bg-pacifica-canary bg-opacity-10 border-pacifica-canary animate-pulse'
                             : 'bg-white border-pacifica-gray'
                         }`}
                       >
@@ -2769,126 +2930,7 @@ function GradingInterface() {
               </div>
             </div>
 
-            <div className="col-span-2">
-              <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
-                <h2 className="text-lg font-semibold text-pacifica-navy mb-4">
-                  Student Progress ({Object.values(grades).filter(g => g.completed).length}/{students.length})
-                </h2>
-                <div className="space-y-3">
-                  {orderedStudents.map((student, idx) => {
-                    const sg = grades[student.id] || { scores: {}, comments: '', completed: false };
-                    const total = calculateTotal(sg);
-                    const colors = ['bg-pacifica-robin bg-opacity-20 text-pacifica-robin', 'bg-green-100 text-green-600', 'bg-pacifica-canary bg-opacity-30 text-pacifica-navy', 'bg-pacifica-tangerine bg-opacity-20 text-pacifica-tangerine'];
-                    const colorClass = colors[idx % 4];
 
-                    return (
-                      <div key={student.id} className={`border rounded-lg p-4 transition-all ${currentStudent === student.name ? 'border-pacifica-orange bg-pacifica-orange bg-opacity-5 shadow-md' : sg.completed ? 'border-green-300 bg-green-50' : 'border-pacifica-gray'}`}>
-                        <div className="flex items-start justify-between mb-3">
-                          <div className="flex items-center gap-3 min-w-0">
-                            <div className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold ${colorClass}`}>
-                              {getInitials(student.name)}
-                            </div>
-                            <div className="min-w-0">
-                              <p className="font-semibold text-pacifica-navy truncate">{student.name}</p>
-                              <p className="text-xs text-pacifica-slate truncate">ID: {student.studentId}</p>
-                            </div>
-                          </div>
-                          <div className="text-right">
-                            <p className={`text-2xl font-bold ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}>{sg.completed ? total : '--'}</p>
-                            <p className="text-xs text-pacifica-slate">{sg.completed ? `/${calculateMaxTotal()}` : 'Not Graded'}</p>
-                          </div>
-                        </div>
-                        <div className="grid grid-cols-4 gap-2 mb-3">
-                          {rubricItems.map(item => {
-                            const isEditing = editingStudent === student.id && editingField === item.name;
-                            const score = sg.scores[item.name] ?? '';
-                            return (
-                              <div key={item.name} className="text-center p-2 bg-white rounded border border-pacifica-gray">
-                                <p className="text-xs text-pacifica-slate truncate mb-1">{item.name}</p>
-                                {isEditing ? (
-                                  <input
-                                    type="number"
-                                    value={score}
-                                    onChange={(e) => updateScore(student.id, item.name, parseInt(e.target.value) || 0)}
-                                    onBlur={() => { setEditingStudent(null); setEditingField(null); }}
-                                    onKeyDown={(e) => { if (e.key === 'Enter') { setEditingStudent(null); setEditingField(null); }}}
-                                    min="0"
-                                    max={item.maxPoints}
-                                    autoFocus
-                                    className="w-full text-lg font-semibold text-center border-2 border-pacifica-orange rounded px-1"
-                                  />
-                                ) : (
-                                  <p
-                                    onClick={() => { setEditingStudent(student.id); setEditingField(item.name); }}
-                                    className={`text-lg font-semibold cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-10 rounded px-1 ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}
-                                    title="Click to edit"
-                                  >
-                                    {sg.scores[item.name] ?? '--'}
-                                  </p>
-                                )}
-                                <p className="text-xs text-pacifica-slate">/ {item.maxPoints}</p>
-                              </div>
-                            );
-                          })}
-                        </div>
-                        <div className={`${sg.completed ? 'bg-pacifica-orange bg-opacity-10' : 'bg-pacifica-gray bg-opacity-20'} rounded p-3`}>
-                          <div className="flex items-center justify-between mb-1">
-                            <p className={`text-xs font-semibold ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-slate'}`}>Comments:</p>
-                            <button
-                              onClick={() => {
-                                if (editingStudent === student.id && editingField === 'comments') {
-                                  setEditingStudent(null); setEditingField(null);
-                                } else {
-                                  setEditingStudent(student.id); setEditingField('comments');
-                                }
-                              }}
-                              className="text-xs text-pacifica-orange hover:text-pacifica-tangerine font-medium"
-                            >
-                              {editingStudent === student.id && editingField === 'comments' ? 'Done' : 'Edit'}
-                            </button>
-                          </div>
-                          {editingStudent === student.id && editingField === 'comments' ? (
-                            <textarea
-                              value={sg.comments}
-                              onChange={(e) => updateComments(student.id, e.target.value)}
-                              onBlur={() => { setTimeout(() => { setEditingStudent(null); setEditingField(null); }, 200); }}
-                              rows={3}
-                              autoFocus
-                              className="w-full text-sm p-2 border-2 border-pacifica-orange rounded"
-                            />
-                          ) : (
-                            <p
-                              onClick={() => { setEditingStudent(student.id); setEditingField('comments'); }}
-                              className="text-sm text-pacifica-navy cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-10 rounded p-1"
-                              title="Click to edit"
-                            >
-                              {sg.comments || 'Click to add comments…'}
-                            </p>
-                          )}
-                        </div>
-                        {!sg.completed && (
-                          <button
-                            onClick={() => {
-                              setGrades(prev => ({
-                                ...prev,
-                                [student.id]: {
-                                  ...prev[student.id],
-                                  completed: true
-                                }
-                              }));
-                              bumpStudentDown(student.id);
-                            }}
-                            className="mt-3 w-full px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
-                          >
-                            Mark as Complete
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
 
           </div>
         </div>
