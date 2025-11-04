@@ -641,8 +641,17 @@ function InlinePDFPanel({ initialItems = [] }) {
   const canPrev = pageNum > 1;
   const canNext = pageCount && pageNum < pageCount;
 
+  const hasItems = items.length > 0;
+
   return (
     <div className="grid grid-cols-1 2xl:grid-cols-12 gap-4">
+      {!hasItems && (
+        <div className="2xl:col-span-12 mb-2">
+          <div className="bg-pacifica-gray bg-opacity-30 border border-pacifica-gray text-pacifica-slate text-sm px-4 py-2 rounded-md text-center">
+            No PDF loaded
+          </div>
+        </div>
+      )}
       <div className="2xl:col-span-4">
         <div className="flex flex-wrap items-center gap-2 mb-3">
           <button onClick={addByUrl} className="btn btn-primary">Add by URL</button>
@@ -777,6 +786,7 @@ function GradingInterface() {
   const [editingField, setEditingField] = useState(null);
   const [sessionId, setSessionId] = useState(null);
   const [micError, setMicError] = useState(null);
+  const [isFileProtocol] = useState(() => window.location?.protocol === 'file:');
 
   const [pendingCount, setPendingCount] = useState(0);
   const chunkIdRef = useRef(0);
@@ -804,6 +814,18 @@ function GradingInterface() {
   const completedRecordingsRef = useRef([]);
   const recordingStartTimeRef = useRef(null);
   const [recordingSegments, setRecordingSegments] = useState([]);
+
+  useEffect(() => {
+    if (isFileProtocol) {
+      console.warn('Serve the Live Grading Assistant over http(s); file:// cannot load proxied PDFs.');
+    }
+  }, [isFileProtocol]);
+
+  const fileProtocolBanner = isFileProtocol ? (
+    <div className="mb-4 rounded-md border border-red-300 bg-red-50 text-red-800 px-4 py-2 text-sm">
+      PDF loading requires serving this page over http(s). Please avoid opening via <code>file://</code>.
+    </div>
+  ) : null;
 
   useEffect(() => {
     if (CONFIG.AIRTABLE_API_KEY === 'YOUR_AIRTABLE_API_KEY_HERE') {
@@ -2211,6 +2233,7 @@ function GradingInterface() {
       <div className="min-h-screen bg-gradient-to-br from-pacifica-navy to-pacifica-midnight p-8">
         <div className="max-w-2xl mx-auto">
           <div className="bg-white rounded-lg shadow-xl p-8">
+            {fileProtocolBanner}
             <div className="text-center mb-8">
               <h1 className="text-4xl font-bold text-pacifica-navy mb-2">Pacifica Christian</h1>
               <p className="text-xl text-pacifica-slate">Live Grading Assistant</p>
@@ -2254,6 +2277,7 @@ function GradingInterface() {
       <div className="min-h-screen bg-gradient-to-br from-pacifica-navy to-pacifica-midnight p-8">
         <div className="max-w-2xl mx-auto">
           <div className="bg-white rounded-lg shadow-xl p-8">
+            {fileProtocolBanner}
             <button onClick={() => { setStep('teacher-select'); setSelectedTeacher(null); setSections([]); setSelectedSections([]); }} className="mb-4 text-pacifica-orange hover:text-pacifica-tangerine font-medium flex items-center gap-2">
               <Icon name="ArrowLeft" className="w-4 h-4" />
               Back to Teachers
@@ -2335,6 +2359,7 @@ function GradingInterface() {
       <div className="min-h-screen bg-gradient-to-br from-pacifica-navy to-pacifica-midnight p-8">
         <div className="max-w-4xl mx-auto">
           <div className="bg-white rounded-lg shadow-xl p-8">
+            {fileProtocolBanner}
             <button onClick={() => { setStep('section-select'); setSelectedSections([]); setStudents([]); }} className="mb-4 text-pacifica-orange hover:text-pacifica-tangerine font-medium flex items-center gap-2">
               <Icon name="ArrowLeft" className="w-4 h-4" />
               Back to Sections
@@ -2597,6 +2622,7 @@ function GradingInterface() {
     return (
       <div className="min-h-screen bg-pacifica-gray bg-opacity-10 p-6">
         <div className="max-w-7xl mx-auto">
+          {fileProtocolBanner}
           <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-4 mb-6">
             <div className="flex items-center justify-between">
               <div>
@@ -2654,7 +2680,7 @@ function GradingInterface() {
             <div className="space-y-6 xl:col-span-8">
               <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
                 <h2 className="text-lg font-semibold text-pacifica-navy mb-4">PDFs</h2>
-                <InlinePDFPanel initialItems={[]} />
+                <InlinePDFPanel initialItems={[{ title: 'Sample PDF', src: 'https://arxiv.org/pdf/1706.03762.pdf', type: 'url' }]} />
               </div>
 
               <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
@@ -3010,6 +3036,7 @@ function GradingInterface() {
     return (
       <div className="min-h-screen bg-pacifica-gray bg-opacity-10 p-6">
         <div className="max-w-7xl mx-auto">
+          {fileProtocolBanner}
           <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6 mb-6">
             <div className="flex items-center justify-between">
               <div>
@@ -3330,6 +3357,7 @@ function GradingInterface() {
   return (
     <div className="min-h-screen bg-white p-6 flex items-center justify-center">
       <div className="bg-white rounded-lg shadow-xl p-8 max-w-md">
+        {fileProtocolBanner}
         <h2 className="text-xl font-bold text-pacifica-navy mb-4">Unknown Step: {step}</h2>
         <p className="text-pacifica-slate mb-4">Something went wrong. Current step is: "{step}"</p>
         <button
