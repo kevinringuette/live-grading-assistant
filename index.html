@@ -46,6 +46,7 @@
     if (window['pdfjsLib']) {
       pdfjsLib.GlobalWorkerOptions.workerSrc =
         "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.js";
+      pdfjsLib.disableWorker = false;
     }
   </script>
   <style>
@@ -361,8 +362,9 @@ function PDFViewer({ item, page, onLoaded }) {
     let cancelled = false;
     (async () => {
       try {
-        if (!item?.url || !window.pdfjsLib) return;
-        const loadingTask = window.pdfjsLib.getDocument(item.url);
+        if (!window.pdfjsLib || (!item?.url && !item?.data)) return;
+        const source = item?.data ? { data: item.data } : item?.url;
+        const loadingTask = window.pdfjsLib.getDocument(source);
         pdfDoc = await loadingTask.promise;
         if (cancelled) return;
 
@@ -422,7 +424,7 @@ function GradingInterface() {
   const [currentStudent, setCurrentStudent] = useState(null);
 
   // ===== PDF Workspace State =====
-  const [pdfItems, setPdfItems] = useState([]); // [{ id, fileName, url, studentId, studentName, pageCount, graded, _hidden }]
+  const [pdfItems, setPdfItems] = useState([]); // [{ id, fileName, url, data, studentId, studentName, pageCount, graded, _hidden }]
   const [selectedPdfIdx, setSelectedPdfIdx] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
 
@@ -507,7 +509,8 @@ function GradingInterface() {
 
         for (const entry of entries) {
           try {
-            const blob = await entry.async('blob');
+            const data = await entry.async('uint8array');
+            const blob = new Blob([data], { type: 'application/pdf' });
             const url = URL.createObjectURL(blob);
             const filenameOnly = entry.name.split('/').pop();
             const guessedName = parseNameFromFilename(filenameOnly);
@@ -517,6 +520,7 @@ function GradingInterface() {
               id: `${zipFile.name}:${entry.name}`,
               fileName: filenameOnly,
               url,
+              data,
               studentId: match?.id || null,
               studentName: match?.name || guessedName,
               pageCount: null,
