@@ -3425,6 +3425,13 @@ function GradingInterface() {
             )}
           </div>
 
+          <div className="mt-6 bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
+            <h2 className="text-lg font-semibold text-pacifica-navy mb-4">
+              PDF Viewer
+            </h2>
+            <PDFViewerPanel initialPdfs={[]} />
+          </div>
+
           {isPdfWorkspaceOpen && (
             <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 sm:p-6">
               <div className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl h-full max-h-[90vh] flex flex-col">
@@ -3599,6 +3606,116 @@ function GradingInterface() {
         >
           Return to Start
         </button>
+      </div>
+    </div>
+  );
+}
+
+function PDFViewerPanel({ initialPdfs = [] }) {
+  const { useState, useCallback } = React;
+  const [pdfs, setPdfs] = useState(initialPdfs);
+  const [currentIndex, setCurrentIndex] = useState(0);
+
+  const buildViewerUrl = (pdfUrl) => {
+    const base = "https://mozilla.github.io/pdf.js/web/viewer.html?file=";
+    return base + encodeURIComponent(pdfUrl);
+  };
+
+  const addByUrl = useCallback(() => {
+    const url = prompt("Paste a PDF URL (must allow CORS):");
+    if (!url) return;
+    const title = prompt("Title for this PDF:") || `PDF ${pdfs.length + 1}`;
+    setPdfs((prev) => [...prev, { title, url }]);
+    setCurrentIndex(pdfs.length);
+  }, [pdfs]);
+
+  const onLocalFiles = useCallback((e) => {
+    const files = Array.from(e.target.files || []).filter(f => f.type === "application/pdf");
+    if (!files.length) return;
+    const entries = files.map(f => ({ title: f.name, url: URL.createObjectURL(f) }));
+    setPdfs(prev => [...prev, ...entries]);
+    setCurrentIndex(pdfs.length);
+    e.target.value = "";
+  }, [pdfs]);
+
+  const removeAt = (i) => {
+    const copy = [...pdfs];
+    copy.splice(i, 1);
+    setPdfs(copy);
+    setCurrentIndex((idx) => Math.max(0, Math.min(idx, copy.length - 1)));
+  };
+
+  const current = pdfs[currentIndex];
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+      <div className="lg:col-span-4 xl:col-span-3">
+        <div className="flex items-center gap-2 mb-2">
+          <button onClick={addByUrl} className="btn btn-primary">
+            Add by URL
+          </button>
+          <label className="btn btn-outline cursor-pointer">
+            Open local
+            <input
+              type="file"
+              accept="application/pdf"
+              multiple
+              className="hidden"
+              onChange={onLocalFiles}
+            />
+          </label>
+        </div>
+        <ul className="space-y-2 max-h-[65vh] overflow-y-auto pr-1">
+          {pdfs.map((p, i) => (
+            <li
+              key={i}
+              className={`rounded-md border p-3 ${i === currentIndex ? "border-pacifica-orange bg-pacifica-orange/10" : "border-pacifica-gray"}`}
+            >
+              <div className="flex items-start gap-2">
+                <button
+                  className="text-left flex-1 font-medium text-pacifica-navy hover:underline"
+                  onClick={() => setCurrentIndex(i)}
+                >
+                  {p.title}
+                </button>
+                <button
+                  className="text-pacifica-slate hover:text-pacifica-orange"
+                  onClick={() => removeAt(i)}
+                  title="Remove"
+                >
+                  ✕
+                </button>
+              </div>
+              <p className="text-xs text-pacifica-slate truncate mt-1">{p.url}</p>
+            </li>
+          ))}
+          {pdfs.length === 0 && (
+            <p className="text-sm text-pacifica-slate italic">
+              No PDFs yet. Add one by URL or from your computer.
+            </p>
+          )}
+        </ul>
+        <p className="text-xs text-pacifica-slate mt-3">
+          Tip: For Google Drive, use <code>https://drive.google.com/uc?export=download&id=FILE_ID</code>
+        </p>
+      </div>
+
+      <div className="lg:col-span-8 xl:col-span-9">
+        <div className="border rounded-lg overflow-hidden bg-white min-h-[70vh]">
+          {current?.url ? (
+            <iframe
+              key={current.url}
+              title="PDF Viewer"
+              src={buildViewerUrl(current.url)}
+              className="w-full h-[75vh]"
+              style={{ border: "0" }}
+            />
+          ) : (
+            <div className="p-8 text-center text-pacifica-slate">
+              Select or add a PDF to view.
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
