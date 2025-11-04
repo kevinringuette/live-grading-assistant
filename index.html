@@ -188,10 +188,69 @@
 <script type="text/babel" data-presets="env,react">
 const { useState, useEffect, useRef, useMemo } = React;
 
+const WEBHOOK_TIMEOUT_MINUTES = 10;
+const WEBHOOK_TIMEOUT_MS = WEBHOOK_TIMEOUT_MINUTES * 60 * 1000;
+
+const fetchWithTimeout = async (url, options = {}, timeoutMs = WEBHOOK_TIMEOUT_MS) => {
+  const { signal: userSignal, ...rest } = options || {};
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  if (userSignal) {
+    if (userSignal.aborted) {
+      controller.abort();
+    } else {
+      userSignal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+  }
+
+  try {
+    return await fetch(url, { ...rest, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+const normalizeWebhookResult = (result, logPrefix) => {
+  let studentsData = [];
+
+  if (Array.isArray(result) && result.length > 0 && result[0].data && Array.isArray(result[0].data)) {
+    studentsData = result[0].data;
+    console.log(`${logPrefix} Received n8n aggregate format with ${studentsData.length} student(s)`);
+  }
+  else if (Array.isArray(result) && result.length > 0 && result[0].studentName) {
+    studentsData = result;
+    console.log(`${logPrefix} Received direct array with ${studentsData.length} student(s)`);
+  }
+  else if (result && result.students && Array.isArray(result.students)) {
+    studentsData = result.students;
+    console.log(`${logPrefix} Received object format with ${studentsData.length} student(s)`);
+  }
+  else if (result && result.studentName && result.scores) {
+    studentsData = [result];
+    console.log(`${logPrefix} Received single student`);
+  }
+  else if (result && result.data && Array.isArray(result.data)) {
+    studentsData = result.data;
+    console.log(`${logPrefix} Received n8n object format with ${studentsData.length} student(s)`);
+  }
+  else if (Array.isArray(result) && result.length === 0) {
+    studentsData = [];
+    console.log(`${logPrefix} Received empty array`);
+  }
+  else {
+    console.log(`${logPrefix} ⚠️ Unrecognized format:`, result);
+  }
+
+  console.log(`${logPrefix} Parsed ${studentsData.length} student(s) for processing`);
+  return studentsData;
+};
+
 const CONFIG = {
   AIRTABLE_API_KEY: 'patCUB0HwqgJr9nOr.d93cc816ba0e0dc0c22bbe5eaada139d84f864256b401446d1c2726da1247b4f',
   AIRTABLE_BASE_ID: 'appTwYDVvnYPB8D2N',
   N8N_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook/voice-grader',
+  N8N_TRANSCRIPT_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook/77f1b709-51b2-4d7f-9d99-b9c8bf063725',
   N8N_EMAIL_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook/80869e6a-5041-41e7-a35d-de6da27193e3',
   TABLES: {
     TEACHERS: 'Teachers',
@@ -311,6 +370,10 @@ function GradingInterface() {
   const [currentStudent, setCurrentStudent] = useState(null);
 
   const [transcript, setTranscript] = useState([]);
+  const [showManualTranscriptInput, setShowManualTranscriptInput] = useState(false);
+  const [manualTranscriptText, setManualTranscriptText] = useState('');
+  const [manualTranscriptError, setManualTranscriptError] = useState(null);
+  const [isSubmittingTranscript, setIsSubmittingTranscript] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [editingStudent, setEditingStudent] = useState(null);
@@ -970,11 +1033,184 @@ function GradingInterface() {
     processSegmentWithN8N(segmentId, chunkNum, blob, entryId, recordingDuration);
   };
 
+  const handleWebhookSuccess = ({ result, entryId, chunkNum = null, recordingDuration = 0, segmentId = null, sourceLabel }) => {
+    const label = sourceLabel || (chunkNum !== null ? `Segment ${chunkNum}` : 'Manual Transcript');
+    const durationSeconds = recordingDuration ? (recordingDuration / 1000).toFixed(1) : null;
+    const headerLabel = durationSeconds ? `${label} (${durationSeconds}s)` : label;
+    const logPrefix = chunkNum !== null ? `[Segment ${chunkNum}]` : `[${label}]`;
+
+    const studentsData = normalizeWebhookResult(result, logPrefix);
+
+    if (studentsData.length > 0) {
+      let transcriptLines = [];
+      let matchedStudents = [];
+      let gradeUpdates = {};
+      let studentIdsToMove = [];
+
+      studentsData.forEach((studentResult, idx) => {
+        console.log(`${logPrefix} Processing student ${idx + 1}/${studentsData.length}:`, studentResult.studentName, 'ID:', studentResult.studentId);
+
+        if (studentResult.studentName && studentResult.scores) {
+          let student = null;
+
+          if (studentResult.studentId) {
+            student = students.find(s => String(s.studentId) === String(studentResult.studentId)) ||
+                      students.find(s => s.id === studentResult.studentId);
+            if (student) {
+              console.log(`${logPrefix}   ✓ Matched by ID: ${student.name}`);
+            } else {
+              console.log(`${logPrefix}   ✗ No match by ID ${studentResult.studentId}`);
+              console.log(`${logPrefix}   Available IDs:`, students.slice(0, 5).map(s => `${s.name}: ${s.studentId}`));
+            }
+          }
+
+          if (!student && studentResult.studentName) {
+            const target = String(studentResult.studentName).trim().toLowerCase();
+            student = students.find(s => (s.name || '').trim().toLowerCase() === target);
+            if (student) {
+              console.log(`${logPrefix}   ✓ Matched by name: ${student.name}`);
+            } else {
+              console.log(`${logPrefix}   ✗ No match by name "${studentResult.studentName}"`);
+            }
+          }
+
+          if (student) {
+            const line = `${student.name}. ${Object.entries(studentResult.scores).map(([k, v]) => `${k} ${v}`).join(', ')}${studentResult.comments ? `. ${studentResult.comments}` : ''}`;
+            transcriptLines.push(line);
+            matchedStudents.push(student.name);
+            studentIdsToMove.push(student.id);
+
+            gradeUpdates[student.id] = {
+              scores: studentResult.scores,
+              comments: studentResult.comments || '',
+              completed: true
+            };
+
+            console.log(`${logPrefix} ✅ Prepared grade for ${student.name}`, studentResult.scores);
+          } else {
+            transcriptLines.push(`${studentResult.studentName} (no match in roster)`);
+            console.log(`${logPrefix} ❌ Student not in roster: ${studentResult.studentName}`);
+          }
+        }
+      });
+
+      if (Object.keys(gradeUpdates).length > 0) {
+        console.log(`${logPrefix} ===== APPLYING ${Object.keys(gradeUpdates).length} GRADE UPDATES =====`);
+        console.log(`${logPrefix} Students to update:`, matchedStudents);
+        console.log(`${logPrefix} Grade data:`, gradeUpdates);
+
+        setGrades(prev => {
+          const updated = { ...prev };
+          Object.entries(gradeUpdates).forEach(([studentId, gradeData]) => {
+            const studentName = students.find(s => s.id === studentId)?.name;
+            console.log(`${logPrefix}   Setting grade for ${studentName} (${studentId}):`, gradeData);
+            updated[studentId] = {
+              scores: { ...(prev[studentId]?.scores || {}), ...gradeData.scores },
+              comments: gradeData.comments || prev[studentId]?.comments || '',
+              completed: true
+            };
+          });
+          console.log(`${logPrefix} Updated grades state:`, Object.keys(updated).length, 'students');
+          return updated;
+        });
+
+        if (studentIdsToMove.length > 0) {
+          setStudentOrder(prev => {
+            const remaining = prev.filter(id => !studentIdsToMove.includes(id));
+            return [...studentIdsToMove, ...remaining];
+          });
+          console.log(`${logPrefix} Moved ${studentIdsToMove.length} student(s) to top of list`);
+        }
+
+        if (matchedStudents.length > 0) {
+          setCurrentStudent(matchedStudents[matchedStudents.length - 1]);
+        }
+      }
+
+      if (transcriptLines.length > 0) {
+        const formattedText = `📍 ${headerLabel}\n${transcriptLines.map(line => `  • ${line}`).join('\n')}`;
+
+        setTranscript(prev => {
+          const filtered = prev.filter(e => e.id !== entryId);
+          return [
+            {
+              id: entryId,
+              text: formattedText,
+              isProcessing: false,
+              segmentNumber: chunkNum,
+              timestamp: new Date().toLocaleTimeString()
+            },
+            ...filtered
+          ];
+        });
+
+        if (segmentId) {
+          setRecordingSegments(prev => prev.map(seg =>
+            seg.id === segmentId ? {
+              ...seg,
+              studentName: matchedStudents.length > 0 ? matchedStudents.join(', ') : studentsData.map(s => s.studentName).join(', '),
+              status: 'completed'
+            } : seg
+          ));
+
+          const recordingIndex = completedRecordingsRef.current.findIndex(r => r.id === segmentId);
+          if (recordingIndex !== -1) {
+            completedRecordingsRef.current[recordingIndex].studentName = matchedStudents.join(', ');
+          }
+        }
+
+        console.log(`${logPrefix} ===== SUMMARY: ${matchedStudents.length}/${studentsData.length} students matched and graded =====`);
+      } else {
+        setTranscript(prev => {
+          const filtered = prev.filter(e => e.id !== entryId);
+          return [
+            {
+              id: entryId,
+              text: `📍 ${label} - No students matched`,
+              isProcessing: false,
+              segmentNumber: chunkNum,
+              timestamp: new Date().toLocaleTimeString()
+            },
+            ...filtered
+          ];
+        });
+
+        if (segmentId) {
+          setRecordingSegments(prev => prev.map(seg =>
+            seg.id === segmentId ? { ...seg, status: 'no-match' } : seg
+          ));
+        }
+      }
+    } else {
+      setTranscript(prev => {
+        const filtered = prev.filter(e => e.id !== entryId);
+        return [
+          {
+            id: entryId,
+            text: `📍 ${label} - Processed without grade data`,
+            isProcessing: false,
+            segmentNumber: chunkNum,
+            timestamp: new Date().toLocaleTimeString()
+          },
+          ...filtered
+        ];
+      });
+
+      if (segmentId) {
+        setRecordingSegments(prev => prev.map(seg =>
+          seg.id === segmentId ? { ...seg, status: 'completed' } : seg
+        ));
+      }
+
+      console.log(`${logPrefix} Processed without grade data`);
+    }
+  };
+
   const processSegmentWithN8N = async (segmentId, chunkNum, blob, entryId, recordingDuration) => {
     try {
       const base64 = await blobToBase64(blob);
       const filename = `segment-${sessionId}-${chunkNum}.webm`;
-      
+
       const roster = students.map(s => ({
         id: s.id,
         studentId: s.studentId,
@@ -1002,235 +1238,178 @@ function GradingInterface() {
         roster
       };
       
-      console.log(`[Segment ${chunkNum}] Sending to n8n...`);
-      
-      const response = await fetch(CONFIG.N8N_WEBHOOK_URL, {
+      const logPrefix = `[Segment ${chunkNum}]`;
+      console.log(`${logPrefix} Sending to n8n...`);
+
+      const response = await fetchWithTimeout(CONFIG.N8N_WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
-      });
-      
-      console.log(`[Segment ${chunkNum}] Response status: ${response.status}`);
-      
+      }, WEBHOOK_TIMEOUT_MS);
+
+      console.log(`${logPrefix} Response status: ${response.status}`);
+
       if (!response.ok) {
         const errorText = await response.text().catch(() => 'Unknown error');
-        console.error(`[Segment ${chunkNum}] Error response:`, errorText);
+        console.error(`${logPrefix} Error response:`, errorText);
         throw new Error(`n8n webhook error (${response.status}): ${errorText}`);
       }
-      
-      const result = await response.json();
-      console.log(`[Segment ${chunkNum}] Result:`, result);
-      
-      let studentsData = [];
-      
-      if (Array.isArray(result) && result.length > 0 && result[0].data && Array.isArray(result[0].data)) {
-        studentsData = result[0].data;
-        console.log(`[Segment ${chunkNum}] Received n8n aggregate format with ${studentsData.length} student(s)`);
-      }
-      else if (Array.isArray(result) && result.length > 0 && result[0].studentName) {
-        studentsData = result;
-        console.log(`[Segment ${chunkNum}] Received direct array with ${studentsData.length} student(s)`);
-      }
-      else if (result.students && Array.isArray(result.students)) {
-        studentsData = result.students;
-        console.log(`[Segment ${chunkNum}] Received object format with ${studentsData.length} student(s)`);
-      }
-      else if (result.studentName && result.scores) {
-        studentsData = [result];
-        console.log(`[Segment ${chunkNum}] Received single student`);
-      }
-      else if (result.data && Array.isArray(result.data)) {
-        studentsData = result.data;
-        console.log(`[Segment ${chunkNum}] Received n8n object format with ${studentsData.length} student(s)`);
-      }
-      else if (Array.isArray(result) && result.length === 0) {
-        studentsData = [];
-        console.log(`[Segment ${chunkNum}] Received empty array`);
-      }
-      else {
-        console.log(`[Segment ${chunkNum}] ⚠️ Unrecognized format:`, result);
-      }
-      
-      console.log(`[Segment ${chunkNum}] Parsed ${studentsData.length} student(s) for processing`);
-      
-      if (studentsData.length > 0) {
-        let transcriptLines = [];
-        let matchedStudents = [];
-        let gradeUpdates = {};
-        let studentIdsToMove = [];
-        
-        studentsData.forEach((studentResult, idx) => {
-          console.log(`[Segment ${chunkNum}] Processing student ${idx + 1}/${studentsData.length}:`, studentResult.studentName, 'ID:', studentResult.studentId);
-          
-          if (studentResult.studentName && studentResult.scores) {
-            let student = null;
-            
-            if (studentResult.studentId) {
-              student = students.find(s => String(s.studentId) === String(studentResult.studentId)) ||
-                        students.find(s => s.id === studentResult.studentId);
-              if (student) {
-                console.log(`[Segment ${chunkNum}]   ✓ Matched by ID: ${student.name}`);
-              } else {
-                console.log(`[Segment ${chunkNum}]   ✗ No match by ID ${studentResult.studentId}`);
-                console.log(`[Segment ${chunkNum}]   Available IDs:`, students.slice(0, 5).map(s => `${s.name}: ${s.studentId}`));
-              }
-            }
-            
-            if (!student && studentResult.studentName) {
-              const target = String(studentResult.studentName).trim().toLowerCase();
-              student = students.find(s => (s.name || '').trim().toLowerCase() === target);
-              if (student) {
-                console.log(`[Segment ${chunkNum}]   ✓ Matched by name: ${student.name}`);
-              } else {
-                console.log(`[Segment ${chunkNum}]   ✗ No match by name "${studentResult.studentName}"`);
-              }
-            }
 
-            if (student) {
-              const line = `${student.name}. ${Object.entries(studentResult.scores).map(([k, v]) => `${k} ${v}`).join(', ')}${studentResult.comments ? `. ${studentResult.comments}` : ''}`;
-              transcriptLines.push(line);
-              matchedStudents.push(student.name);
-              studentIdsToMove.push(student.id);
-              
-              gradeUpdates[student.id] = {
-                scores: studentResult.scores,
-                comments: studentResult.comments || '',
-                completed: true
-              };
-              
-              console.log(`[Segment ${chunkNum}] ✅ Prepared grade for ${student.name}`, studentResult.scores);
-            } else {
-              transcriptLines.push(`${studentResult.studentName} (no match in roster)`);
-              console.log(`[Segment ${chunkNum}] ❌ Student not in roster: ${studentResult.studentName}`);
-            }
-          }
-        });
-        
-        if (Object.keys(gradeUpdates).length > 0) {
-          console.log(`[Segment ${chunkNum}] ===== APPLYING ${Object.keys(gradeUpdates).length} GRADE UPDATES =====`);
-          console.log(`[Segment ${chunkNum}] Students to update:`, matchedStudents);
-          console.log(`[Segment ${chunkNum}] Grade data:`, gradeUpdates);
-          
-          setGrades(prev => {
-            const updated = { ...prev };
-            Object.entries(gradeUpdates).forEach(([studentId, gradeData]) => {
-              const studentName = students.find(s => s.id === studentId)?.name;
-              console.log(`[Segment ${chunkNum}]   Setting grade for ${studentName} (${studentId}):`, gradeData);
-              updated[studentId] = {
-                scores: { ...(prev[studentId]?.scores || {}), ...gradeData.scores },
-                comments: gradeData.comments || prev[studentId]?.comments || '',
-                completed: true
-              };
-            });
-            console.log(`[Segment ${chunkNum}] Updated grades state:`, Object.keys(updated).length, 'students');
-            return updated;
-          });
-          
-          if (studentIdsToMove.length > 0) {
-            setStudentOrder(prev => {
-              const remaining = prev.filter(id => !studentIdsToMove.includes(id));
-              return [...studentIdsToMove, ...remaining];
-            });
-            console.log(`[Segment ${chunkNum}] Moved ${studentIdsToMove.length} student(s) to top of list`);
-          }
-          
-          if (matchedStudents.length > 0) {
-            setCurrentStudent(matchedStudents[matchedStudents.length - 1]);
-          }
-        }
-        
-        if (transcriptLines.length > 0) {
-          const formattedText = `📍 Segment ${chunkNum} (${(recordingDuration/1000).toFixed(1)}s)\n${transcriptLines.map(line => `  • ${line}`).join('\n')}`;
-          
-          setTranscript(prev => {
-            const filtered = prev.filter(e => e.id !== entryId);
-            return [
-              { 
-                id: entryId, 
-                text: formattedText, 
-                isProcessing: false,
-                segmentNumber: chunkNum,
-                timestamp: new Date().toLocaleTimeString()
-              },
-              ...filtered
-            ];
-          });
-          
-          setRecordingSegments(prev => prev.map(seg => 
-            seg.id === segmentId ? { 
-              ...seg, 
-              studentName: matchedStudents.length > 0 ? matchedStudents.join(', ') : studentsData.map(s => s.studentName).join(', '),
-              status: 'completed' 
-            } : seg
-          ));
-          
-          const recordingIndex = completedRecordingsRef.current.findIndex(r => r.id === segmentId);
-          if (recordingIndex !== -1) {
-            completedRecordingsRef.current[recordingIndex].studentName = matchedStudents.join(', ');
-          }
-          
-          console.log(`[Segment ${chunkNum}] ===== SUMMARY: ${matchedStudents.length}/${studentsData.length} students matched and graded =====`);
-        } else {
-          setTranscript(prev => {
-            const filtered = prev.filter(e => e.id !== entryId);
-            return [
-              { 
-                id: entryId, 
-                text: `📍 Segment ${chunkNum} - No students matched`, 
-                isProcessing: false,
-                segmentNumber: chunkNum,
-                timestamp: new Date().toLocaleTimeString()
-              },
-              ...filtered
-            ];
-          });
-          setRecordingSegments(prev => prev.map(seg => 
-            seg.id === segmentId ? { ...seg, status: 'no-match' } : seg
-          ));
-        }
-      } else {
-        setTranscript(prev => {
-          const filtered = prev.filter(e => e.id !== entryId);
-          return [
-            { 
-              id: entryId, 
-              text: `📍 Segment ${chunkNum} - Processed without grade data`, 
-              isProcessing: false,
-              segmentNumber: chunkNum,
-              timestamp: new Date().toLocaleTimeString()
-            },
-            ...filtered
-          ];
-        });
-        setRecordingSegments(prev => prev.map(seg => 
-          seg.id === segmentId ? { ...seg, status: 'completed' } : seg
-        ));
-        console.log(`[Segment ${chunkNum}] Processed without grade data`);
-      }
+      const result = await response.json();
+      console.log(`${logPrefix} Result:`, result);
+
+      handleWebhookSuccess({
+        result,
+        entryId,
+        chunkNum,
+        recordingDuration,
+        segmentId,
+        sourceLabel: `Segment ${chunkNum}`
+      });
       
     } catch (err) {
-      console.error(`[Segment ${chunkNum}] Processing error:`, err);
-      const errorMessage = err.message.includes('n8n') 
-        ? `n8n error on segment ${chunkNum}: ${err.message}`
-        : `Processing error: ${err.message}`;
+      const logPrefix = `[Segment ${chunkNum}]`;
+      console.error(`${logPrefix} Processing error:`, err);
+      const message = err && err.message ? err.message : 'Unknown error';
+      const isTimeout = err && err.name === 'AbortError';
+      const errorMessage = isTimeout
+        ? `n8n request timed out after ${WEBHOOK_TIMEOUT_MINUTES} minutes on segment ${chunkNum}.`
+        : message.includes('n8n')
+          ? `n8n error on segment ${chunkNum}: ${message}`
+          : `Processing error: ${message}`;
       setTranscript(prev => {
         const filtered = prev.filter(e => e.id !== entryId);
         return [
-          { 
-            id: entryId, 
-            text: `❌ ${errorMessage}`, 
+          {
+            id: entryId,
+            text: `❌ ${errorMessage}`,
             isProcessing: false,
+            segmentNumber: chunkNum,
             timestamp: new Date().toLocaleTimeString()
           },
           ...filtered
         ];
       });
-      setRecordingSegments(prev => prev.map(seg => 
-        seg.id === segmentId ? { ...seg, status: 'error' } : seg
-      ));
+      if (segmentId) {
+        setRecordingSegments(prev => prev.map(seg =>
+          seg.id === segmentId ? { ...seg, status: 'error' } : seg
+        ));
+      }
     } finally {
       setPendingCount(prev => Math.max(0, prev - 1));
       console.log(`[Segment ${chunkNum}] Processing complete`);
+    }
+  };
+
+  const submitManualTranscript = async () => {
+    if (!CONFIG.N8N_TRANSCRIPT_WEBHOOK_URL) {
+      setManualTranscriptError('Transcript webhook URL is not configured.');
+      return;
+    }
+
+    if (!manualTranscriptText.trim()) {
+      setManualTranscriptError('Please paste a transcript before submitting.');
+      return;
+    }
+
+    const logPrefix = '[Manual Transcript]';
+    const entryId = Date.now();
+    const timestamp = new Date().toLocaleTimeString();
+
+    setManualTranscriptError(null);
+    setIsSubmittingTranscript(true);
+    setPendingCount(prev => prev + 1);
+    setTranscript(prev => [
+      {
+        id: entryId,
+        text: '⏳ Processing manual transcript...',
+        isProcessing: true,
+        segmentNumber: null,
+        timestamp
+      },
+      ...prev
+    ]);
+
+    try {
+      const roster = students.map(s => ({
+        id: s.id,
+        studentId: s.studentId,
+        name: s.name,
+        email: s.email
+      }));
+
+      const payload = {
+        transcript: {
+          text: manualTranscriptText.trim()
+        },
+        session: {
+          id: sessionId || '',
+          assignment: assignmentName || '',
+          teacherName: selectedTeacher?.name || '',
+          teacherEmail: selectedTeacher?.email || '',
+          teacherId: selectedTeacher?.id || '',
+          sections: selectedSections.map(s => ({ name: s.name, id: s.id }))
+        },
+        rubric: rubricItems,
+        roster
+      };
+
+      console.log(`${logPrefix} Sending to n8n...`);
+
+      const response = await fetchWithTimeout(CONFIG.N8N_TRANSCRIPT_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }, WEBHOOK_TIMEOUT_MS);
+
+      console.log(`${logPrefix} Response status: ${response.status}`);
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => 'Unknown error');
+        console.error(`${logPrefix} Error response:`, errorText);
+        throw new Error(`n8n webhook error (${response.status}): ${errorText}`);
+      }
+
+      const result = await response.json();
+      console.log(`${logPrefix} Result:`, result);
+
+      handleWebhookSuccess({
+        result,
+        entryId,
+        sourceLabel: 'Manual Transcript'
+      });
+
+      setManualTranscriptText('');
+      setShowManualTranscriptInput(false);
+    } catch (err) {
+      console.error(`${logPrefix} Processing error:`, err);
+      const message = err && err.message ? err.message : 'Unknown error';
+      const isTimeout = err && err.name === 'AbortError';
+      const errorMessage = isTimeout
+        ? `Manual transcript request timed out after ${WEBHOOK_TIMEOUT_MINUTES} minutes.`
+        : message.includes('n8n')
+          ? `n8n error on manual transcript: ${message}`
+          : `Processing error: ${message}`;
+
+      setTranscript(prev => {
+        const filtered = prev.filter(e => e.id !== entryId);
+        return [
+          {
+            id: entryId,
+            text: `❌ ${errorMessage}`,
+            isProcessing: false,
+            segmentNumber: null,
+            timestamp: new Date().toLocaleTimeString()
+          },
+          ...filtered
+        ];
+      });
+
+      setManualTranscriptError(errorMessage);
+    } finally {
+      setIsSubmittingTranscript(false);
+      setPendingCount(prev => Math.max(0, prev - 1));
+      console.log(`${logPrefix} Processing complete`);
     }
   };
 
@@ -2192,7 +2371,74 @@ function GradingInterface() {
               </div>
 
               <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
-                <h2 className="text-lg font-semibold text-pacifica-navy mb-4">Transcript (Newest First)</h2>
+                <div className="flex items-center justify-between mb-4 gap-3">
+                  <h2 className="text-lg font-semibold text-pacifica-navy">Transcript (Newest First)</h2>
+                  <button
+                    onClick={() => {
+                      setManualTranscriptError(null);
+                      setShowManualTranscriptInput(prev => !prev);
+                    }}
+                    className="btn btn-outline"
+                  >
+                    <Icon name={showManualTranscriptInput ? 'minus' : 'file-text'} className="w-4 h-4" />
+                    {showManualTranscriptInput ? 'Close' : 'Paste Transcript'}
+                  </button>
+                </div>
+
+                {showManualTranscriptInput && (
+                  <div className="mb-4 p-4 border border-pacifica-gray rounded-lg bg-pacifica-gray bg-opacity-10 animate-fadeIn">
+                    <label className="block text-sm font-semibold text-pacifica-navy mb-2" htmlFor="manual-transcript-input">
+                      Paste transcript text
+                    </label>
+                    <textarea
+                      id="manual-transcript-input"
+                      value={manualTranscriptText}
+                      onChange={(e) => setManualTranscriptText(e.target.value)}
+                      rows={6}
+                      className="w-full p-3 border border-pacifica-gray rounded-lg focus:ring-2 focus:ring-pacifica-orange focus:border-pacifica-orange text-sm"
+                      placeholder="Paste transcript content here..."
+                      disabled={isSubmittingTranscript}
+                    ></textarea>
+                    <div className="flex flex-wrap items-center justify-between mt-2 gap-2 text-xs text-pacifica-slate">
+                      <span>{manualTranscriptText.length} characters</span>
+                      <span>Webhook wait time: up to {WEBHOOK_TIMEOUT_MINUTES} minutes</span>
+                    </div>
+                    {manualTranscriptError && (
+                      <p className="text-sm text-red-600 mt-2">{manualTranscriptError}</p>
+                    )}
+                    <div className="flex justify-end gap-2 mt-4">
+                      <button
+                        onClick={() => {
+                          setShowManualTranscriptInput(false);
+                          setManualTranscriptText('');
+                          setManualTranscriptError(null);
+                        }}
+                        className="btn btn-outline"
+                        disabled={isSubmittingTranscript}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={submitManualTranscript}
+                        className="btn btn-primary"
+                        disabled={isSubmittingTranscript}
+                      >
+                        {isSubmittingTranscript ? (
+                          <>
+                            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                            Submitting…
+                          </>
+                        ) : (
+                          <>
+                            <Icon name="send" className="w-4 h-4" />
+                            Submit Transcript
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 <div className="h-96 overflow-y-auto bg-pacifica-gray bg-opacity-10 rounded p-4 text-sm space-y-3">
                   {transcript.length === 0 ? (
                     <p className="text-pacifica-gray italic">{isRecording ? 'Press SPACEBAR to process...' : 'Start recording'}</p>
