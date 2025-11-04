@@ -40,49 +40,11 @@
   </script>
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-  <!-- PDF.js -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.js"></script>
-  <script>
-    const resolvePdfjsLib = () => {
-      const lib = window.pdfjsLib || window['pdfjs-dist/build/pdf'];
-      if (lib && lib.GlobalWorkerOptions) {
-        lib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.js";
-      }
-      return lib;
-    };
-
-    const lib = resolvePdfjsLib();
-    if (lib) {
-      window.pdfjsLib = lib;
-    } else {
-      Object.defineProperty(window, 'pdfjsLib', {
-        configurable: true,
-        enumerable: true,
-        get() {
-          return resolvePdfjsLib();
-        },
-        set(value) {
-          if (value) {
-            value.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.js";
-            Object.defineProperty(window, 'pdfjsLib', { value, configurable: true, writable: true });
-          }
-        }
-      });
-    }
-  </script>
   <style>
     body {
       font-family: 'Gotham', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
     }
-
-    /* Small scale/fade for selected items */
-    @keyframes popIn {
-      0% { transform: scale(.98); opacity: .4; }
-      100% { transform: scale(1); opacity: 1; }
-    }
-    .pop-in { animation: popIn .12s ease-out; }
-
+    
     /* Minimal button kit (brand-aware) */
     .btn {
       display: inline-flex;
@@ -224,7 +186,7 @@
 <div id="root"></div>
 
 <script type="text/babel" data-presets="env,react">
-const { useState, useEffect, useRef, useMemo, useCallback } = React;
+const { useState, useEffect, useRef, useMemo } = React;
 
 const WEBHOOK_TIMEOUT_MINUTES = 10;
 const WEBHOOK_TIMEOUT_MS = WEBHOOK_TIMEOUT_MINUTES * 60 * 1000;
@@ -290,7 +252,7 @@ const CONFIG = {
   N8N_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook/voice-grader',
   N8N_TRANSCRIPT_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook/77f1b709-51b2-4d7f-9d99-b9c8bf063725',
   N8N_EMAIL_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook/80869e6a-5041-41e7-a35d-de6da27193e3',
-  PDF_PROXY_URL: 'https://kringuette0.app.n8n.cloud/webhook/pdf-proxy',
+  GDRIVE_API_KEY: 'YOUR_GOOGLE_API_KEY_HERE',
   TABLES: {
     TEACHERS: 'Teachers',
     SECTIONS: 'Master Sections',
@@ -330,29 +292,16 @@ const Icon = ({ name, className = "w-5 h-5" }) => {
       const luc = window.lucide;
       if (!luc || !luc.icons) return;
       const resolved = resolveIconName(name);
-      const iconNode = luc.icons[resolved];
-      if (!iconNode) {
+      const icon = luc.icons[resolved];
+      if (!icon) {
         if (ref.current) ref.current.innerHTML = "";
         return;
       }
       try {
-        if (typeof iconNode?.toSvg === 'function') {
-          const svg = iconNode.toSvg({ class: className });
-          if (ref.current) ref.current.innerHTML = svg;
-          return;
-        }
-        if (typeof luc.createElement === 'function') {
-          const svgEl = luc.createElement(iconNode, { class: className });
-          if (ref.current) {
-            ref.current.innerHTML = "";
-            ref.current.appendChild(svgEl);
-          }
-          return;
-        }
-        if (ref.current) ref.current.innerHTML = "";
+        const svg = icon.toSvg({ class: className });
+        if (ref.current) ref.current.innerHTML = svg;
       } catch (err) {
         console.error('Error rendering icon:', name, err);
-        if (ref.current) ref.current.innerHTML = "";
       }
     };
 
@@ -384,365 +333,86 @@ const blobToBase64 = (blob) =>
     reader.readAsDataURL(blob);
   });
 
-  const getPdfjsCandidate = () => window.pdfjsLib || window['pdfjs-dist/build/pdf'];
-
-  const configurePdfjs = (lib) => {
-    if (!lib) return null;
-    window.pdfjsLib = lib;
-    if (lib?.GlobalWorkerOptions) {
-      lib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.js";
-    }
-    return lib;
-  };
-
-  const waitForPdfjsLib = (() => {
-    let readyPromise = null;
-    return () => {
-      const immediate = configurePdfjs(getPdfjsCandidate());
-      if (immediate) return Promise.resolve(immediate);
-      if (!readyPromise) {
-        readyPromise = new Promise((resolve, reject) => {
-          let attempts = 0;
-          const maxAttempts = 100;
-          const interval = setInterval(() => {
-            attempts += 1;
-            const candidate = configurePdfjs(getPdfjsCandidate());
-            if (candidate) {
-              clearInterval(interval);
-              resolve(candidate);
-            } else if (attempts >= maxAttempts) {
-              clearInterval(interval);
-              readyPromise = null;
-              reject(new Error('PDF.js failed to load'));
-            }
-          }, 100);
-        });
-      }
-      return readyPromise;
-    };
-  })();
-
 function chunk(arr, size = 10) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
 }
 
-function InlinePDFPanel({ initialItems = [] }) {
-  const { useState, useEffect, useRef } = React;
-  const [items, setItems] = useState(initialItems);
-  const [currentIdx, setCurrentIdx] = useState(0);
-  const [pageNum, setPageNum] = useState(1);
-  const [pageCount, setPageCount] = useState(null);
-  const [scale, setScale] = useState(1.1);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const canvasRef = useRef(null);
-  const pdfRef = useRef(null);
-  const itemsRef = useRef(initialItems);
+const DRIVE_ID_REGEX = /[-\w]{10,}/;
 
-  useEffect(() => {
-    itemsRef.current = items;
-  }, [items]);
+const parseDriveFolderId = (input = '') => {
+  if (!input) return '';
+  const trimmed = String(input).trim();
+  try {
+    const url = new URL(trimmed);
+    const explicitId = url.searchParams.get('id');
+    if (explicitId) return explicitId;
+    const parts = url.pathname.split('/').filter(Boolean);
+    const folderIdx = parts.findIndex((part) => part === 'folders');
+    if (folderIdx >= 0 && parts[folderIdx + 1]) {
+      return parts[folderIdx + 1];
+    }
+  } catch (err) {
+    // Not a URL, fall back to regex matching
+  }
+  const match = trimmed.match(DRIVE_ID_REGEX);
+  return match ? match[0] : '';
+};
 
-  useEffect(() => () => {
-    itemsRef.current.forEach(item => {
-      if (item?.type === 'blob' && item?.src?.startsWith('blob:')) {
-        URL.revokeObjectURL(item.src);
-      }
+const normalizeName = (value) =>
+  String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const insertSpacesInCamelCase = (value) =>
+  String(value || '').replace(/([a-z])([A-Z])/g, '$1 $2');
+
+const parseNameFromFilename = (fileName) => {
+  if (!fileName) return '';
+  const base = fileName.replace(/\.[^/.]+$/, '');
+  const withSpaces = insertSpacesInCamelCase(base.replace(/[_-]+/g, ' '));
+  const cleaned = withSpaces
+    .replace(/\b(assignment|hw|homework|quiz|test|page|pdf)\b/gi, ' ')
+    .replace(/\b\d+(?:\.\d+)?\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  if (cleaned.includes(',')) {
+    const [last, first] = cleaned.split(',').map((part) => part.trim());
+    return `${first} ${last}`.trim();
+  }
+  return cleaned;
+};
+
+const matchStudentFromName = (students, rawName) => {
+  const n = normalizeName(rawName);
+  if (!n) return null;
+  const direct = students.find((s) => normalizeName(s.name) === n);
+  if (direct) return direct;
+  const prefix = students.find((s) => normalizeName(s.name).startsWith(`${n} `));
+  if (prefix) return prefix;
+  const suffix = students.find((s) => normalizeName(s.name).endsWith(` ${n}`));
+  if (suffix) return suffix;
+  const parts = n.split(' ').filter(Boolean);
+  if (parts.length >= 2) {
+    const [first, last] = [parts[0], parts[parts.length - 1]];
+    const candidates = students.filter((s) => {
+      const normalized = normalizeName(s.name);
+      return normalized.includes(first) && normalized.includes(last);
     });
-    if (pdfRef.current?.destroy) {
-      try { pdfRef.current.destroy(); } catch (_) {}
-    }
-  }, []);
+    if (candidates.length === 1) return candidates[0];
+  }
+  return null;
+};
 
-  const current = items[currentIdx];
+const buildDriveDownloadUrl = (fileId) =>
+  `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`;
 
-  const proxiedUrl = (rawUrl) => {
-    if (!rawUrl) return null;
-    if (rawUrl.startsWith('blob:')) return rawUrl;
-    if (!CONFIG.PDF_PROXY_URL) return rawUrl;
-    return `${CONFIG.PDF_PROXY_URL}?url=${encodeURIComponent(rawUrl)}`;
-  };
-
-  const clearCanvas = () => {
-    const canvas = canvasRef.current;
-    if (canvas) {
-      const ctx = canvas.getContext('2d');
-      if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
-    }
-  };
-
-  const renderPage = async (targetPage = pageNum, instance = null) => {
-    const pdf = instance || pdfRef.current;
-    const canvas = canvasRef.current;
-    if (!pdf || !canvas) return;
-    try {
-      setLoading(true);
-      const safePage = Math.min(Math.max(1, targetPage), pdf.numPages || 1);
-      const page = await pdf.getPage(safePage);
-      const viewport = page.getViewport({ scale });
-      const ctx = canvas.getContext('2d');
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      await page.render({ canvasContext: ctx, viewport }).promise;
-    } catch (e) {
-      console.error('Render error:', e);
-      setError('Failed to render this page.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadPdf = async (src) => {
-    if (!src) {
-      pdfRef.current = null;
-      clearCanvas();
-      setPageCount(null);
-      setPageNum(1);
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    setPageCount(null);
-    clearCanvas();
-    try {
-      const lib = await waitForPdfjsLib();
-      if (pdfRef.current?.destroy) {
-        try { await pdfRef.current.destroy(); } catch (_) {}
-      }
-      let loadingTask;
-      if (src.startsWith('blob:')) {
-        const resp = await fetch(src);
-        const buf = await resp.arrayBuffer();
-        loadingTask = lib.getDocument({ data: new Uint8Array(buf) });
-      } else {
-        loadingTask = lib.getDocument({ url: proxiedUrl(src) });
-      }
-      const pdf = await loadingTask.promise;
-      pdfRef.current = pdf;
-      setPageCount(pdf.numPages);
-      setScale(1.1);
-      setPageNum(1);
-      await renderPage(1, pdf);
-    } catch (e) {
-      console.error('PDF load error:', e);
-      setError('Failed to load PDF. Try a different source or use a local file.');
-      pdfRef.current = null;
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    if (current?.src) {
-      loadPdf(current.src);
-    } else {
-      loadPdf(null);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentIdx, current?.src]);
-
-  useEffect(() => {
-    if (pdfRef.current) {
-      renderPage(pageNum);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pageNum, scale]);
-
-  const addFolderFromUrl = async (url) => {
-    const JSZipLib = window.JSZip;
-    if (!JSZipLib) {
-      setError('Folder import requires JSZip support.');
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const target = proxiedUrl(url);
-      const response = await fetch(target);
-      if (!response.ok) throw new Error(`Fetch failed with status ${response.status}`);
-      const arrayBuffer = await response.arrayBuffer();
-      const zip = await JSZipLib.loadAsync(arrayBuffer);
-      const pdfEntries = [];
-      const files = Object.values(zip.files || {}).filter(file => !file.dir && /\.pdf$/i.test(file.name));
-      for (const entry of files) {
-        const data = await entry.async('uint8array');
-        const blob = new Blob([data], { type: 'application/pdf' });
-        const objectUrl = URL.createObjectURL(blob);
-        const baseName = entry.name.split('/').pop() || 'PDF';
-        const title = baseName.replace(/\.pdf$/i, '');
-        pdfEntries.push({ title, src: objectUrl, type: 'blob' });
-      }
-      if (pdfEntries.length === 0) {
-        setError('No PDFs found in that folder.');
-        return;
-      }
-      const startIndex = items.length;
-      setItems(prev => [...prev, ...pdfEntries]);
-      setCurrentIdx(startIndex);
-    } catch (err) {
-      console.error('Folder import failed:', err);
-      setError('Failed to import folder URL. Make sure it downloads a ZIP containing PDFs.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const addFolderPrompt = async () => {
-    const url = prompt('Paste a folder download URL (ZIP) that contains PDFs.');
-    if (!url) return;
-    await addFolderFromUrl(url.trim());
-  };
-
-  const addByUrl = async () => {
-    const url = prompt('Paste a PDF URL or ZIP download URL (Drive OK; we proxy it).');
-    if (!url) return;
-    const trimmed = url.trim();
-    if (/\.zip($|\?)/i.test(trimmed)) {
-      await addFolderFromUrl(trimmed);
-      return;
-    }
-    const title = prompt('Title for this PDF:') || `PDF ${items.length + 1}`;
-    setItems(prev => [...prev, { title, src: trimmed, type: 'url' }]);
-    setCurrentIdx(items.length);
-  };
-
-  const onLocalFiles = (e) => {
-    const files = Array.from(e.target.files || []).filter(f => f.type === 'application/pdf');
-    if (!files.length) return;
-    const entries = files.map(f => ({
-      title: f.name.replace(/\.pdf$/i, ''),
-      src: URL.createObjectURL(f),
-      type: 'blob'
-    }));
-    setItems(prev => [...prev, ...entries]);
-    setCurrentIdx(items.length);
-    e.target.value = '';
-  };
-
-  const removeAt = (i) => {
-    const copy = [...items];
-    const [removed] = copy.splice(i, 1);
-    if (removed?.type === 'blob' && removed?.src?.startsWith('blob:')) {
-      URL.revokeObjectURL(removed.src);
-    }
-    setItems(copy);
-    setCurrentIdx(idx => Math.max(0, Math.min(idx, copy.length - 1)));
-    if (copy.length === 0) {
-      pdfRef.current = null;
-      setPageCount(null);
-      setPageNum(1);
-      setError(null);
-      clearCanvas();
-    }
-  };
-
-  const canPrev = pageNum > 1;
-  const canNext = pageCount && pageNum < pageCount;
-
-  const hasItems = items.length > 0;
-
-  return (
-    <div className="grid grid-cols-1 2xl:grid-cols-12 gap-4">
-      {!hasItems && (
-        <div className="2xl:col-span-12 mb-2">
-          <div className="bg-pacifica-gray bg-opacity-30 border border-pacifica-gray text-pacifica-slate text-sm px-4 py-2 rounded-md text-center">
-            No PDF loaded
-          </div>
-        </div>
-      )}
-      <div className="2xl:col-span-4">
-        <div className="flex flex-wrap items-center gap-2 mb-3">
-          <button onClick={addByUrl} className="btn btn-primary">Add by URL</button>
-          <button onClick={addFolderPrompt} className="btn btn-outline">Add folder URL</button>
-          <label className="btn btn-outline cursor-pointer">
-            Open local
-            <input type="file" accept="application/pdf" multiple className="hidden" onChange={onLocalFiles} />
-          </label>
-        </div>
-        <ul className="space-y-2 max-h-[60vh] overflow-y-auto pr-1">
-          {items.map((p, i) => (
-            <li
-              key={`${p.src}-${i}`}
-              className={`rounded-md border p-3 transition-colors ${i === currentIdx ? 'border-pacifica-orange bg-pacifica-orange/10' : 'border-pacifica-gray'}`}
-            >
-              <div className="flex items-start gap-2">
-                <button
-                  className="text-left flex-1 font-medium text-pacifica-navy hover:underline"
-                  onClick={() => setCurrentIdx(i)}
-                >
-                  {p.title}
-                </button>
-                <button
-                  className="text-pacifica-slate hover:text-pacifica-orange"
-                  onClick={() => removeAt(i)}
-                  title="Remove"
-                >
-                  ✕
-                </button>
-              </div>
-              <p className="text-xs text-pacifica-slate truncate mt-1">{p.src}</p>
-            </li>
-          ))}
-          {items.length === 0 && (
-            <p className="text-sm text-pacifica-slate italic">
-              No PDFs yet. Add one by URL, folder, or from your computer.
-            </p>
-          )}
-        </ul>
-        <p className="text-xs text-pacifica-slate mt-3">
-          URLs are fetched through the proxy to avoid CORS. Folder URLs should download a ZIP that contains PDFs.
-        </p>
-      </div>
-
-      <div className="2xl:col-span-8">
-        <div className="border rounded-lg bg-white">
-          <div className="flex flex-wrap items-center justify-between gap-3 p-3 border-b">
-            <div className="flex items-center gap-2">
-              <button className="btn btn-outline" disabled={!canPrev} onClick={() => setPageNum(p => Math.max(1, p - 1))}>Prev</button>
-              <div className="text-sm text-pacifica-slate">
-                Page {pageCount ? pageNum : '--'} / {pageCount ?? '--'}
-              </div>
-              <button
-                className="btn btn-outline"
-                disabled={!canNext}
-                onClick={() => setPageNum(p => {
-                  if (!pageCount) return p;
-                  return Math.min(pageCount, p + 1);
-                })}
-              >
-                Next
-              </button>
-            </div>
-            <div className="flex items-center gap-2">
-              <button className="btn btn-outline" onClick={() => setScale(s => Math.max(0.5, +(s - 0.1).toFixed(2)))}>-</button>
-              <span className="text-sm w-14 text-center">{Math.round(scale * 100)}%</span>
-              <button className="btn btn-outline" onClick={() => setScale(s => Math.min(3, +(s + 0.1).toFixed(2)))}>+</button>
-            </div>
-          </div>
-
-          <div className="relative min-h-[70vh] flex items-center justify-center bg-pacifica-gray bg-opacity-10">
-            {error && (
-              <div className="p-4 text-red-700 text-sm text-center max-w-sm">{error}</div>
-            )}
-            {!error && <canvas ref={canvasRef} className="bg-white shadow-sm rounded m-3"></canvas>}
-            {loading && (
-              <div className="absolute inset-0 bg-white bg-opacity-70 flex flex-col items-center justify-center gap-2">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-pacifica-orange"></div>
-                <p className="text-sm font-medium text-pacifica-slate">Loading PDF…</p>
-              </div>
-            )}
-          </div>
-
-          <div className="p-2 text-center text-xs text-pacifica-slate">
-            {current ? current.title : 'Select or add a PDF to begin.'}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+const buildDrivePreviewUrl = (fileId) =>
+  `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/preview`;
 
 function GradingInterface() {
   const [step, setStep] = useState('teacher-select');
@@ -784,9 +454,13 @@ function GradingInterface() {
   const [error, setError] = useState(null);
   const [editingStudent, setEditingStudent] = useState(null);
   const [editingField, setEditingField] = useState(null);
+  const [driveFolderUrl, setDriveFolderUrl] = useState('');
+  const [drivePdfItems, setDrivePdfItems] = useState([]);
+  const [driveLoading, setDriveLoading] = useState(false);
+  const [driveError, setDriveError] = useState(null);
+  const [selectedDriveId, setSelectedDriveId] = useState(null);
   const [sessionId, setSessionId] = useState(null);
   const [micError, setMicError] = useState(null);
-  const [isFileProtocol] = useState(() => window.location?.protocol === 'file:');
 
   const [pendingCount, setPendingCount] = useState(0);
   const chunkIdRef = useRef(0);
@@ -814,18 +488,6 @@ function GradingInterface() {
   const completedRecordingsRef = useRef([]);
   const recordingStartTimeRef = useRef(null);
   const [recordingSegments, setRecordingSegments] = useState([]);
-
-  useEffect(() => {
-    if (isFileProtocol) {
-      console.warn('Serve the Live Grading Assistant over http(s); file:// cannot load proxied PDFs.');
-    }
-  }, [isFileProtocol]);
-
-  const fileProtocolBanner = isFileProtocol ? (
-    <div className="mb-4 rounded-md border border-red-300 bg-red-50 text-red-800 px-4 py-2 text-sm">
-      PDF loading requires serving this page over http(s). Please avoid opening via <code>file://</code>.
-    </div>
-  ) : null;
 
   useEffect(() => {
     if (CONFIG.AIRTABLE_API_KEY === 'YOUR_AIRTABLE_API_KEY_HERE') {
@@ -993,6 +655,94 @@ function GradingInterface() {
     }
     setSessionId(Date.now().toString());
     setStep('grading');
+  };
+
+  const loadDriveFolderPdfs = async (folderId) => {
+    let pageToken = null;
+    const files = [];
+    do {
+      const params = new URLSearchParams({
+        q: ["'", folderId, "' in parents and mimeType='application/pdf' and trashed=false"].join(''),
+        fields: 'files(id,name,modifiedTime,size),nextPageToken',
+        pageSize: '1000',
+        key: CONFIG.GDRIVE_API_KEY,
+        supportsAllDrives: 'true',
+        includeItemsFromAllDrives: 'true'
+      });
+      if (pageToken) params.append('pageToken', pageToken);
+      const response = await fetch(`https://www.googleapis.com/drive/v3/files?${params.toString()}`);
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Drive API error: ${response.status} ${text}`);
+      }
+      const json = await response.json();
+      if (Array.isArray(json.files)) {
+        files.push(...json.files);
+      }
+      pageToken = json.nextPageToken;
+    } while (pageToken);
+    return files;
+  };
+
+  const handleLoadDriveFolder = async () => {
+    setDriveError(null);
+    const folderId = parseDriveFolderId(driveFolderUrl);
+    if (!folderId) {
+      setDriveError('Please paste a valid Google Drive folder link or ID.');
+      setDrivePdfItems([]);
+      setSelectedDriveId(null);
+      setCurrentStudent(null);
+      return;
+    }
+    if (!CONFIG.GDRIVE_API_KEY || CONFIG.GDRIVE_API_KEY.includes('YOUR_GOOGLE_API_KEY_HERE')) {
+      setDriveError('Please configure CONFIG.GDRIVE_API_KEY with a Google Drive API key.');
+      return;
+    }
+    setDriveLoading(true);
+    try {
+      const files = await loadDriveFolderPdfs(folderId);
+      const mapped = files.map((file) => {
+        const guessedName = parseNameFromFilename(file.name);
+        const match = matchStudentFromName(students, guessedName);
+        const studentName = match?.name || guessedName || file.name || 'Unknown';
+        return {
+          id: file.id,
+          fileName: file.name,
+          studentId: match?.id || null,
+          studentName,
+          downloadUrl: buildDriveDownloadUrl(file.id),
+          previewUrl: buildDrivePreviewUrl(file.id),
+          matched: Boolean(match)
+        };
+      });
+      mapped.sort((a, b) => String(a.studentName || '').localeCompare(b.studentName || ''));
+      setDrivePdfItems(mapped);
+      if (mapped.length > 0) {
+        setSelectedDriveId(mapped[0].id);
+        if (mapped[0].studentName) {
+          setCurrentStudent(mapped[0].studentName);
+        }
+      } else {
+        setSelectedDriveId(null);
+        setDriveError('No PDF files were found in that folder.');
+        setCurrentStudent(null);
+      }
+    } catch (err) {
+      console.error('Failed to load Drive folder', err);
+      setDriveError('Failed to load PDFs from Google Drive. Check the folder permissions and API key.');
+      setDrivePdfItems([]);
+      setSelectedDriveId(null);
+      setCurrentStudent(null);
+    } finally {
+      setDriveLoading(false);
+    }
+  };
+
+  const handleSelectDriveItem = (item) => {
+    setSelectedDriveId(item.id);
+    if (item.studentName) {
+      setCurrentStudent(item.studentName);
+    }
   };
 
   const loadSavedRubrics = async () => {
@@ -1636,9 +1386,7 @@ function GradingInterface() {
         name: s.name,
         email: s.email
       }));
-
-      const activeStudent = currentStudent ? { id: null, name: currentStudent } : null;
-
+      
       const payload = {
         audio: {
           filename,
@@ -1653,8 +1401,7 @@ function GradingInterface() {
           teacherName: selectedTeacher?.name || '',
           teacherEmail: selectedTeacher?.email || '',
           teacherId: selectedTeacher?.id || '',
-          sections: selectedSections.map(s => ({ name: s.name, id: s.id })),
-          activeStudent
+          sections: selectedSections.map(s => ({ name: s.name, id: s.id }))
         },
         rubric: rubricItems,
         roster
@@ -2051,12 +1798,6 @@ function GradingInterface() {
     return studentOrder.map(id => students.find(s => s.id === id)).filter(Boolean);
   }, [studentOrder, students]);
 
-  const completedCount = useMemo(() => {
-    return Object.values(grades).filter(g => g?.completed).length;
-  }, [grades]);
-
-  const maxPossibleScore = useMemo(() => calculateMaxTotal(), [rubricItems]);
-
   const filteredTeachers = useMemo(() => {
     const q = teacherQuery.toLowerCase();
     return teachers.filter(t => t.name.toLowerCase().includes(q) || (t.email || '').toLowerCase().includes(q));
@@ -2233,7 +1974,6 @@ function GradingInterface() {
       <div className="min-h-screen bg-gradient-to-br from-pacifica-navy to-pacifica-midnight p-8">
         <div className="max-w-2xl mx-auto">
           <div className="bg-white rounded-lg shadow-xl p-8">
-            {fileProtocolBanner}
             <div className="text-center mb-8">
               <h1 className="text-4xl font-bold text-pacifica-navy mb-2">Pacifica Christian</h1>
               <p className="text-xl text-pacifica-slate">Live Grading Assistant</p>
@@ -2277,7 +2017,6 @@ function GradingInterface() {
       <div className="min-h-screen bg-gradient-to-br from-pacifica-navy to-pacifica-midnight p-8">
         <div className="max-w-2xl mx-auto">
           <div className="bg-white rounded-lg shadow-xl p-8">
-            {fileProtocolBanner}
             <button onClick={() => { setStep('teacher-select'); setSelectedTeacher(null); setSections([]); setSelectedSections([]); }} className="mb-4 text-pacifica-orange hover:text-pacifica-tangerine font-medium flex items-center gap-2">
               <Icon name="ArrowLeft" className="w-4 h-4" />
               Back to Teachers
@@ -2307,32 +2046,28 @@ function GradingInterface() {
                 </div>
                 <div className="space-y-2 max-h-96 overflow-y-auto mb-6">
                   {filteredSections.map(section => {
+                    const isSelected = selectedSections.find(s => s.id === section.id);
                     return (
                       <button
                         key={section.id}
                         onClick={() => toggleSection(section)}
-                        className={`w-full text-left p-4 rounded-xl border transition-all pop-in ${
-                          selectedSections.find(s => s.id === section.id)
-                            ? 'border-pacifica-orange bg-gradient-to-r from-pacifica-orange/10 to-pacifica-canary/10 shadow-sm scale-[1.01]'
-                            : 'border-pacifica-gray hover:border-pacifica-orange hover:bg-pacifica-orange/5'
+                        className={`w-full text-left p-4 border-2 rounded-lg transition-all ${
+                          isSelected 
+                            ? 'border-pacifica-orange bg-pacifica-orange bg-opacity-10' 
+                            : 'border-pacifica-gray hover:bg-pacifica-orange hover:bg-opacity-5 hover:border-pacifica-orange'
                         }`}
                       >
                         <div className="flex items-center justify-between">
-                          <div className="min-w-0">
-                            <p className="font-semibold text-pacifica-navy truncate">{section.name}</p>
-                            <p className="text-xs text-pacifica-slate truncate">
-                              {section.sectionId ? `ID: ${section.sectionId} • ` : ''}{section.studentCount} students
-                            </p>
+                          <div>
+                            <p className="font-semibold text-pacifica-navy">{section.name}</p>
+                            <p className="text-sm text-pacifica-slate">{section.studentCount} students</p>
                           </div>
-                          <div
-                            className={`relative inline-flex h-7 items-center rounded-full px-2 text-xs font-semibold transition-colors ${
-                              selectedSections.find(s => s.id === section.id)
-                                ? 'bg-green-100 text-green-700'
-                                : 'bg-pacifica-gray/40 text-pacifica-navy'
-                            }`}
-                          >
-                            <Icon name={selectedSections.find(s => s.id === section.id) ? 'Check' : 'Plus'} className="w-4 h-4 mr-1" />
-                            {selectedSections.find(s => s.id === section.id) ? 'Selected' : 'Select'}
+                          <div className={`w-6 h-6 rounded border-2 flex items-center justify-center ${
+                            isSelected ? 'bg-pacifica-orange border-pacifica-orange' : 'border-pacifica-gray'
+                          }`}>
+                            {isSelected && (
+                              <Icon name="Check" className="w-4 h-4 text-white" />
+                            )}
                           </div>
                         </div>
                       </button>
@@ -2359,8 +2094,16 @@ function GradingInterface() {
       <div className="min-h-screen bg-gradient-to-br from-pacifica-navy to-pacifica-midnight p-8">
         <div className="max-w-4xl mx-auto">
           <div className="bg-white rounded-lg shadow-xl p-8">
-            {fileProtocolBanner}
-            <button onClick={() => { setStep('section-select'); setSelectedSections([]); setStudents([]); }} className="mb-4 text-pacifica-orange hover:text-pacifica-tangerine font-medium flex items-center gap-2">
+            <button onClick={() => {
+              setStep('section-select');
+              setSelectedSections([]);
+              setStudents([]);
+              setDrivePdfItems([]);
+              setSelectedDriveId(null);
+              setDriveFolderUrl('');
+              setDriveError(null);
+              setCurrentStudent(null);
+            }} className="mb-4 text-pacifica-orange hover:text-pacifica-tangerine font-medium flex items-center gap-2">
               <Icon name="ArrowLeft" className="w-4 h-4" />
               Back to Sections
             </button>
@@ -2384,7 +2127,7 @@ function GradingInterface() {
               <div className="flex justify-between items-center mb-4">
                 <label className="block text-sm font-medium text-pacifica-navy">Rubric Items</label>
                 <div className="flex gap-2">
-                  <button 
+                  <button
                     onClick={openRubricBrowser}
                     className="px-3 py-1 bg-pacifica-robin text-white text-sm rounded-lg hover:bg-pacifica-midnight flex items-center gap-1"
                   >
@@ -2435,7 +2178,45 @@ function GradingInterface() {
                   </div>
                 ))}
               </div>
-              <p className="text-sm text-pacifica-slate mt-2">Total Points: {maxPossibleScore}</p>
+              <p className="text-sm text-pacifica-slate mt-2">Total Points: {calculateMaxTotal()}</p>
+            </div>
+
+            <div className="mb-6">
+              <label className="block text-sm font-medium text-pacifica-navy mb-2">
+                Google Drive Folder (PDFs)
+              </label>
+              <div className="flex flex-col md:flex-row gap-3">
+                <input
+                  type="text"
+                  value={driveFolderUrl}
+                  onChange={(e) => { setDriveFolderUrl(e.target.value); setDriveError(null); }}
+                  placeholder="https://drive.google.com/drive/folders/…"
+                  className="flex-1 px-4 py-2 border-2 border-pacifica-gray rounded-lg focus:ring-2 focus:ring-pacifica-orange focus:border-transparent"
+                />
+                <button
+                  onClick={handleLoadDriveFolder}
+                  disabled={driveLoading}
+                  className="px-4 py-2 bg-pacifica-robin text-white font-semibold rounded-lg hover:bg-pacifica-midnight disabled:bg-pacifica-gray disabled:cursor-not-allowed"
+                >
+                  {driveLoading ? 'Loading…' : 'Load PDFs'}
+                </button>
+              </div>
+              <p className="text-xs text-pacifica-slate mt-2">
+                Paste a shared folder link. Make sure the folder is shared publicly or with anyone who has the link.
+              </p>
+              {CONFIG.GDRIVE_API_KEY.includes('YOUR_GOOGLE_API_KEY_HERE') && (
+                <p className="text-xs text-red-600 mt-2">
+                  Add your Google Drive API key in CONFIG.GDRIVE_API_KEY to enable folder loading.
+                </p>
+              )}
+              {driveError && (
+                <p className="text-sm text-red-600 mt-2">{driveError}</p>
+              )}
+              {!driveError && drivePdfItems.length > 0 && (
+                <p className="text-sm text-pacifica-slate mt-2">
+                  Loaded {drivePdfItems.length} PDF{drivePdfItems.length === 1 ? '' : 's'} from Google Drive.
+                </p>
+              )}
             </div>
 
             <div className="mb-6">
@@ -2622,7 +2403,6 @@ function GradingInterface() {
     return (
       <div className="min-h-screen bg-pacifica-gray bg-opacity-10 p-6">
         <div className="max-w-7xl mx-auto">
-          {fileProtocolBanner}
           <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-4 mb-6">
             <div className="flex items-center justify-between">
               <div>
@@ -2638,7 +2418,7 @@ function GradingInterface() {
                 )}
                 <button
                   onClick={() => setStep('review')}
-                  disabled={completedCount === 0}
+                  disabled={Object.values(grades).filter(g => g.completed).length === 0}
                   className="px-4 py-2 bg-pacifica-orange text-white font-semibold rounded-lg hover:bg-pacifica-tangerine disabled:bg-pacifica-gray disabled:cursor-not-allowed transition-colors flex items-center gap-2"
                 >
                   <Icon name="clipboard-check" className="w-4 h-4" />
@@ -2660,6 +2440,11 @@ function GradingInterface() {
                       setGrades({});
                       setTranscript([]);
                       setRecordingSegments([]);
+                      setDrivePdfItems([]);
+                      setDriveFolderUrl('');
+                      setSelectedDriveId(null);
+                      setDriveError(null);
+                      setCurrentStudent(null);
                       completedRecordingsRef.current = [];
                     }
                   }}
@@ -2676,13 +2461,82 @@ function GradingInterface() {
             )}
           </div>
 
-          <div className="grid grid-cols-1 gap-6 xl:grid-cols-12 items-start">
-            <div className="space-y-6 xl:col-span-8">
+          <div className="grid grid-cols-3 gap-6">
+            <div className="space-y-6">
               <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
-                <h2 className="text-lg font-semibold text-pacifica-navy mb-4">PDFs</h2>
-                <InlinePDFPanel initialItems={[{ title: 'Sample PDF', src: 'https://arxiv.org/pdf/1706.03762.pdf', type: 'url' }]} />
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold text-pacifica-navy">Google Drive PDFs</h2>
+                  <button
+                    onClick={handleLoadDriveFolder}
+                    disabled={driveLoading || !driveFolderUrl}
+                    className="btn btn-outline text-sm"
+                  >
+                    Refresh
+                  </button>
+                </div>
+                {driveLoading ? (
+                  <p className="text-sm text-pacifica-slate">Loading PDFs…</p>
+                ) : drivePdfItems.length === 0 ? (
+                  <div className="text-sm text-pacifica-slate">
+                    {driveFolderUrl
+                      ? 'No PDF files detected. Confirm the folder link and sharing permissions.'
+                      : 'No PDF folder loaded. Paste a shared folder link in Assignment Setup to load files.'}
+                  </div>
+                ) : (
+                  <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                    {drivePdfItems.map((item) => {
+                      const gradeState = item.studentId ? grades[item.studentId] : null;
+                      const status = gradeState?.completed ? 'Graded' : 'Pending';
+                      const statusClass = gradeState?.completed
+                        ? 'bg-green-100 text-green-700'
+                        : 'bg-pacifica-gray bg-opacity-40 text-pacifica-navy';
+                      return (
+                        <button
+                          key={item.id}
+                          onClick={() => handleSelectDriveItem(item)}
+                          className={`w-full text-left border rounded-lg p-3 transition-colors ${
+                            selectedDriveId === item.id
+                              ? 'border-pacifica-orange bg-pacifica-orange bg-opacity-10'
+                              : 'border-pacifica-gray hover:border-pacifica-orange'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="font-semibold text-pacifica-navy truncate">{item.studentName}</p>
+                              <p className="text-xs text-pacifica-slate truncate">{item.fileName}</p>
+                              <p className="text-xs mt-1 text-pacifica-slate">
+                                {item.matched ? 'Matched to roster' : 'No roster match'}
+                              </p>
+                            </div>
+                            <div className="flex flex-col items-end gap-1 text-xs">
+                              <span className={`px-2 py-0.5 rounded-full ${statusClass}`}>{status}</span>
+                              <a
+                                href={item.previewUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-pacifica-orange hover:underline"
+                              >
+                                Preview
+                              </a>
+                              <a
+                                href={item.downloadUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-pacifica-slate hover:underline"
+                              >
+                                Download
+                              </a>
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                {driveError && (
+                  <p className="text-sm text-red-600 mt-3">{driveError}</p>
+                )}
               </div>
-
               <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
                 <h2 className="text-lg font-semibold text-pacifica-navy mb-4">Recording Controls</h2>
                 <div className="flex flex-col items-center gap-4">
@@ -2738,6 +2592,22 @@ function GradingInterface() {
                       </p>
                     </div>
                   )}
+                </div>
+              </div>
+
+              <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
+                <h2 className="text-lg font-semibold text-pacifica-navy mb-4">Rubric Reference</h2>
+                <div className="space-y-2">
+                  {rubricItems.map((item, idx) => (
+                    <div key={idx} className="flex justify-between">
+                      <span className="text-sm text-pacifica-slate">{item.name}</span>
+                      <span className="text-sm font-semibold text-pacifica-navy">/{item.maxPoints}</span>
+                    </div>
+                  ))}
+                  <div className="pt-2 border-t border-pacifica-gray flex justify-between">
+                    <span className="text-sm font-semibold text-pacifica-navy">Total</span>
+                    <span className="text-sm font-bold text-pacifica-orange">/{calculateMaxTotal()}</span>
+                  </div>
                 </div>
               </div>
 
@@ -2834,8 +2704,8 @@ function GradingInterface() {
                     <div className="flex justify-end gap-2 mt-4">
                       <button
                         onClick={() => {
-                          setManualTranscriptText('');
                           setShowManualTranscriptInput(false);
+                          setManualTranscriptText('');
                           setManualTranscriptError(null);
                         }}
                         className="btn btn-outline"
@@ -2869,12 +2739,12 @@ function GradingInterface() {
                     <p className="text-pacifica-gray italic">{isRecording ? 'Press SPACEBAR to process...' : 'Start recording'}</p>
                   ) : (
                     transcript.map((entry) => (
-                      <div
-                        key={entry.id}
-                        className={`${
-                          entry.isProcessing
-                            ? 'p-3 rounded-lg border bg-pacifica-canary bg-opacity-10 border-pacifica-canary animate-pulse'
-                            : 'p-3 rounded-lg border bg-white border-pacifica-gray'
+                      <div 
+                        key={entry.id} 
+                        className={`p-3 rounded-lg border ${
+                          entry.isProcessing 
+                            ? 'bg-pacifica-canary bg-opacity-10 border-pacifica-canary animate-pulse' 
+                            : 'bg-white border-pacifica-gray'
                         }`}
                       >
                         {entry.timestamp && (
@@ -2887,163 +2757,148 @@ function GradingInterface() {
                 </div>
               </div>
             </div>
-            <div className="xl:col-span-4">
-              <div className="space-y-6 xl:sticky xl:top-6">
-                <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6 flex flex-col max-h-[80vh]">
-                  <h2 className="text-lg font-semibold text-pacifica-navy">
-                    Student Progress ({Object.values(grades).filter(g => g.completed).length}/{students.length})
-                  </h2>
-                  <div className="mt-4 space-y-3 overflow-y-auto pr-1">
-                    {orderedStudents.map((student, idx) => {
-                      const sg = grades[student.id] || { scores: {}, comments: '', completed: false };
-                      const total = calculateTotal(sg);
-                      const colors = ['bg-pacifica-robin bg-opacity-20 text-pacifica-robin', 'bg-green-100 text-green-600', 'bg-pacifica-canary bg-opacity-30 text-pacifica-navy', 'bg-pacifica-tangerine bg-opacity-20 text-pacifica-tangerine'];
-                      const colorClass = colors[idx % 4];
 
-                      return (
-                        <div key={student.id} className={`border rounded-lg p-4 transition-all ${currentStudent === student.name ? 'border-pacifica-orange bg-pacifica-orange bg-opacity-5 shadow-md' : sg.completed ? 'border-green-300 bg-green-50' : 'border-pacifica-gray'}`}>
-                          <div className="flex items-start justify-between mb-3">
-                            <div className="flex items-center gap-3 min-w-0">
-                              <div className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold ${colorClass}`}>
-                                {getInitials(student.name)}
+            <div className="col-span-2">
+              <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
+                <h2 className="text-lg font-semibold text-pacifica-navy mb-4">
+                  Student Progress ({Object.values(grades).filter(g => g.completed).length}/{students.length})
+                </h2>
+                <div className="space-y-3">
+                  {orderedStudents.map((student, idx) => {
+                    const sg = grades[student.id] || { scores: {}, comments: '', completed: false };
+                    const total = calculateTotal(sg);
+                    const colors = ['bg-pacifica-robin bg-opacity-20 text-pacifica-robin', 'bg-green-100 text-green-600', 'bg-pacifica-canary bg-opacity-30 text-pacifica-navy', 'bg-pacifica-tangerine bg-opacity-20 text-pacifica-tangerine'];
+                    const colorClass = colors[idx % 4];
+
+                    return (
+                      <div key={student.id} className={`border rounded-lg p-4 transition-all ${currentStudent === student.name ? 'border-pacifica-orange bg-pacifica-orange bg-opacity-5 shadow-md' : sg.completed ? 'border-green-300 bg-green-50' : 'border-pacifica-gray'}`}>
+                        <div className="flex items-start justify-between mb-3">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold ${colorClass}`}>
+                              {getInitials(student.name)}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="font-semibold text-pacifica-navy truncate">{student.name}</p>
+                              <p className="text-xs text-pacifica-slate truncate">ID: {student.studentId}</p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className={`text-2xl font-bold ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}>{sg.completed ? total : '--'}</p>
+                            <p className="text-xs text-pacifica-slate">{sg.completed ? `/${calculateMaxTotal()}` : 'Not Graded'}</p>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-4 gap-2 mb-3">
+                          {rubricItems.map(item => {
+                            const isEditing = editingStudent === student.id && editingField === item.name;
+                            const score = sg.scores[item.name] ?? '';
+                            return (
+                              <div key={item.name} className="text-center p-2 bg-white rounded border border-pacifica-gray">
+                                <p className="text-xs text-pacifica-slate truncate mb-1">{item.name}</p>
+                                {isEditing ? (
+                                  <input
+                                    type="number"
+                                    value={score}
+                                    onChange={(e) => updateScore(student.id, item.name, parseInt(e.target.value) || 0)}
+                                    onBlur={() => { setEditingStudent(null); setEditingField(null); }}
+                                    onKeyDown={(e) => { if (e.key === 'Enter') { setEditingStudent(null); setEditingField(null); }}}
+                                    min="0"
+                                    max={item.maxPoints}
+                                    autoFocus
+                                    className="w-full text-lg font-semibold text-center border-2 border-pacifica-orange rounded px-1"
+                                  />
+                                ) : (
+                                  <p
+                                    onClick={() => { setEditingStudent(student.id); setEditingField(item.name); }}
+                                    className={`text-lg font-semibold cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-10 rounded px-1 ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}
+                                    title="Click to edit"
+                                  >
+                                    {sg.scores[item.name] ?? '--'}
+                                  </p>
+                                )}
+                                <p className="text-xs text-pacifica-slate">/ {item.maxPoints}</p>
                               </div>
-                              <div className="min-w-0">
-                                <p className="font-semibold text-pacifica-navy truncate">{student.name}</p>
-                                <p className="text-xs text-pacifica-slate truncate">ID: {student.studentId}</p>
-                              </div>
-                            </div>
-                            <div className="text-right">
-                              <p className={`text-2xl font-bold ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}>{sg.completed ? total : '--'}</p>
-                              <p className="text-xs text-pacifica-slate">{sg.completed ? `/${maxPossibleScore}` : 'Not Graded'}</p>
-                            </div>
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-2 mb-3">
-                            {rubricItems.map(item => {
-                              const isEditing = editingStudent === student.id && editingField === item.name;
-                              const score = sg.scores[item.name] ?? '';
-                              return (
-                                <div key={item.name} className="text-center p-2 bg-white rounded border border-pacifica-gray">
-                                  <p className="text-xs text-pacifica-slate truncate mb-1">{item.name}</p>
-                                  {isEditing ? (
-                                    <input
-                                      type="number"
-                                      value={score}
-                                      onChange={(e) => updateScore(student.id, item.name, parseInt(e.target.value) || 0)}
-                                      onBlur={() => { setEditingStudent(null); setEditingField(null); }}
-                                      onKeyDown={(e) => { if (e.key === 'Enter') { setEditingStudent(null); setEditingField(null); } }}
-                                      min="0"
-                                      max={item.maxPoints}
-                                      autoFocus
-                                      className="w-full text-lg font-semibold text-center border-2 border-pacifica-orange rounded px-1"
-                                    />
-                                  ) : (
-                                    <p
-                                      onClick={() => { setEditingStudent(student.id); setEditingField(item.name); }}
-                                      className={`text-lg font-semibold cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-10 rounded px-1 ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}
-                                    >
-                                      {sg.scores[item.name] ?? '--'}
-                                    </p>
-                                  )}
-                                  <p className="text-xs text-pacifica-slate">/ {item.maxPoints}</p>
-                                </div>
-                              );
-                            })}
-                          </div>
-
-                          <div className={`${sg.completed ? 'bg-pacifica-orange bg-opacity-10' : 'bg-pacifica-gray bg-opacity-20'} rounded p-3`}>
-                            <div className="flex items-center justify-between mb-1">
-                              <p className={`text-xs font-semibold ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-slate'}`}>Comments:</p>
-                              <button
-                                onClick={() => {
-                                  if (editingStudent === student.id && editingField === 'comments') {
-                                    setEditingStudent(null); setEditingField(null);
-                                  } else {
-                                    setEditingStudent(student.id); setEditingField('comments');
-                                  }
-                                }}
-                                className="text-xs text-pacifica-orange hover:text-pacifica-tangerine font-medium"
-                              >
-                                {editingStudent === student.id && editingField === 'comments' ? 'Done' : 'Edit'}
-                              </button>
-                            </div>
-                            {editingStudent === student.id && editingField === 'comments' ? (
-                              <textarea
-                                value={sg.comments}
-                                onChange={(e) => updateComments(student.id, e.target.value)}
-                                onBlur={() => { setTimeout(() => { setEditingStudent(null); setEditingField(null); }, 200); }}
-                                rows={3}
-                                autoFocus
-                                className="w-full text-sm p-2 border-2 border-pacifica-orange rounded"
-                              />
-                            ) : (
-                              <p
-                                onClick={() => { setEditingStudent(student.id); setEditingField('comments'); }}
-                                className="text-sm text-pacifica-navy cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-10 rounded p-1"
-                                title="Click to edit"
-                              >
-                                {sg.comments || 'Click to add comments…'}
-                              </p>
-                            )}
-                          </div>
-
-                          {!sg.completed && (
+                            );
+                          })}
+                        </div>
+                        <div className={`${sg.completed ? 'bg-pacifica-orange bg-opacity-10' : 'bg-pacifica-gray bg-opacity-20'} rounded p-3`}>
+                          <div className="flex items-center justify-between mb-1">
+                            <p className={`text-xs font-semibold ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-slate'}`}>Comments:</p>
                             <button
                               onClick={() => {
-                                setGrades(prev => ({
-                                  ...prev,
-                                  [student.id]: {
-                                    ...prev[student.id],
-                                    completed: true
-                                  }
-                                }));
-                                bumpStudentDown(student.id);
+                                if (editingStudent === student.id && editingField === 'comments') {
+                                  setEditingStudent(null); setEditingField(null);
+                                } else {
+                                  setEditingStudent(student.id); setEditingField('comments');
+                                }
                               }}
-                              className="mt-3 w-full px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
+                              className="text-xs text-pacifica-orange hover:text-pacifica-tangerine font-medium"
                             >
-                              Mark as Complete
+                              {editingStudent === student.id && editingField === 'comments' ? 'Done' : 'Edit'}
                             </button>
+                          </div>
+                          {editingStudent === student.id && editingField === 'comments' ? (
+                            <textarea
+                              value={sg.comments}
+                              onChange={(e) => updateComments(student.id, e.target.value)}
+                              onBlur={() => { setTimeout(() => { setEditingStudent(null); setEditingField(null); }, 200); }}
+                              rows={3}
+                              autoFocus
+                              className="w-full text-sm p-2 border-2 border-pacifica-orange rounded"
+                            />
+                          ) : (
+                            <p
+                              onClick={() => { setEditingStudent(student.id); setEditingField('comments'); }}
+                              className="text-sm text-pacifica-navy cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-10 rounded p-1"
+                              title="Click to edit"
+                            >
+                              {sg.comments || 'Click to add comments…'}
+                            </p>
                           )}
                         </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
-                  <h2 className="text-lg font-semibold text-pacifica-navy mb-4">Rubric Reference</h2>
-                  <div className="space-y-2">
-                    {rubricItems.map((item, idx) => (
-                      <div key={idx} className="flex justify-between">
-                        <span className="text-sm text-pacifica-slate">{item.name}</span>
-                        <span className="text-sm font-semibold text-pacifica-navy">/{item.maxPoints}</span>
+                        {!sg.completed && (
+                          <button
+                            onClick={() => {
+                              setGrades(prev => ({
+                                ...prev,
+                                [student.id]: {
+                                  ...prev[student.id],
+                                  completed: true
+                                }
+                              }));
+                              bumpStudentDown(student.id);
+                            }}
+                            className="mt-3 w-full px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
+                          >
+                            Mark as Complete
+                          </button>
+                        )}
                       </div>
-                    ))}
-                    <div className="pt-2 border-t border-pacifica-gray flex justify-between">
-                      <span className="text-sm font-semibold text-pacifica-navy">Total</span>
-                      <span className="text-sm font-bold text-pacifica-orange">/{maxPossibleScore}</span>
-                    </div>
-                  </div>
+                    );
+                  })}
                 </div>
               </div>
             </div>
+
+          </div>
         </div>
       </div>
     );
   }
 
   if (step === 'review') {
+    const completedCount = Object.values(grades).filter(g => g.completed).length;
+    const maxTotal = calculateMaxTotal();
+    
     return (
       <div className="min-h-screen bg-pacifica-gray bg-opacity-10 p-6">
         <div className="max-w-7xl mx-auto">
-          {fileProtocolBanner}
           <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6 mb-6">
             <div className="flex items-center justify-between">
               <div>
                 <h1 className="text-3xl font-bold text-pacifica-navy">Review Grades - {assignmentName}</h1>
                 <p className="text-pacifica-slate mt-1">{selectedTeacher?.name} • {selectedSections.map(s => s.name).join(', ')}</p>
                 <p className="text-sm text-pacifica-slate mt-1">
-                  {completedCount} of {students.length} students graded • Max Points: {maxPossibleScore}
+                  {completedCount} of {students.length} students graded • Max Points: {maxTotal}
                 </p>
               </div>
               <div className="flex flex-col items-end gap-3">
@@ -3236,7 +3091,7 @@ function GradingInterface() {
                       style={{ cursor: 'pointer' }}
                     >
                       <div>Total</div>
-                      <div className="text-xs font-normal text-pacifica-slate mt-1">/ {maxPossibleScore}</div>
+                      <div className="text-xs font-normal text-pacifica-slate mt-1">/ {maxTotal}</div>
                     </th>
                     <th 
                       className={`px-4 py-3 text-left text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === rubricItems.length + 3 ? 'column-header-selected' : ''}`}
@@ -3349,6 +3204,55 @@ function GradingInterface() {
             </div>
           </div>
 
+          <div className="mt-6 bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
+            <h2 className="text-lg font-semibold text-pacifica-navy mb-4">Recording Segments ({recordingSegments.length})</h2>
+            {recordingSegments.length === 0 ? (
+              <p className="text-sm text-pacifica-gray italic">No recordings available.</p>
+            ) : (
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <p className="text-sm text-pacifica-slate">{recordingSegments.length} recording(s) available for download</p>
+                  <button
+                    onClick={downloadAllRecordings}
+                    className="px-4 py-2 bg-pacifica-orange text-white rounded-lg hover:bg-pacifica-tangerine flex items-center gap-2"
+                  >
+                    <Icon name="download" className="w-4 h-4" />
+                    Download All as Zip
+                  </button>
+                </div>
+                <div className="grid grid-cols-4 gap-3">
+                  {recordingSegments.map((segment) => (
+                    <div
+                      key={segment.id}
+                      onClick={() => {
+                        const recording = completedRecordingsRef.current.find(r => r.id === segment.id);
+                        if (recording) downloadRecording(recording);
+                      }}
+                      className={`p-3 rounded-lg border cursor-pointer transition-all hover:shadow-md ${
+                        segment.status === 'completed' ? 'bg-green-50 border-green-300' :
+                        segment.status === 'processing' ? 'bg-pacifica-canary bg-opacity-20 border-pacifica-canary' :
+                        segment.status === 'error' ? 'bg-red-50 border-red-300' :
+                        'bg-pacifica-gray bg-opacity-20 border-pacifica-gray'
+                      }`}
+                      title="Click to download"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Icon name="file-audio" className="w-4 h-4" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold truncate text-pacifica-navy">
+                            {segment.studentName || `Segment ${segment.chunkNumber}`}
+                          </p>
+                          <p className="text-xs text-pacifica-slate">
+                            {(segment.duration / 1000).toFixed(1)}s • {Math.round(segment.size / 1024)}KB
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -3357,7 +3261,6 @@ function GradingInterface() {
   return (
     <div className="min-h-screen bg-white p-6 flex items-center justify-center">
       <div className="bg-white rounded-lg shadow-xl p-8 max-w-md">
-        {fileProtocolBanner}
         <h2 className="text-xl font-bold text-pacifica-navy mb-4">Unknown Step: {step}</h2>
         <p className="text-pacifica-slate mb-4">Something went wrong. Current step is: "{step}"</p>
         <button
