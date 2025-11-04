@@ -44,10 +44,31 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.js"></script>
   <script>
-    window.pdfjsLib = window['pdfjs-dist/build/pdf'] || window.pdfjsLib;
-    if (window.pdfjsLib) {
-      window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-        "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.js";
+    const resolvePdfjsLib = () => {
+      const lib = window.pdfjsLib || window['pdfjs-dist/build/pdf'];
+      if (lib && lib.GlobalWorkerOptions) {
+        lib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.js";
+      }
+      return lib;
+    };
+
+    const lib = resolvePdfjsLib();
+    if (lib) {
+      window.pdfjsLib = lib;
+    } else {
+      Object.defineProperty(window, 'pdfjsLib', {
+        configurable: true,
+        enumerable: true,
+        get() {
+          return resolvePdfjsLib();
+        },
+        set(value) {
+          if (value) {
+            value.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.js";
+            Object.defineProperty(window, 'pdfjsLib', { value, configurable: true, writable: true });
+          }
+        }
+      });
     }
   </script>
   <style>
@@ -363,29 +384,43 @@ const blobToBase64 = (blob) =>
     reader.readAsDataURL(blob);
   });
 
-const waitForPdfjsLib = (() => {
-  let readyPromise = null;
-  return () => {
-    if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
-    if (!readyPromise) {
-      readyPromise = new Promise((resolve, reject) => {
-        let attempts = 0;
-        const maxAttempts = 50;
-        const interval = setInterval(() => {
-          attempts += 1;
-          if (window.pdfjsLib) {
-            clearInterval(interval);
-            resolve(window.pdfjsLib);
-          } else if (attempts >= maxAttempts) {
-            clearInterval(interval);
-            reject(new Error('PDF.js failed to load'));
-          }
-        }, 100);
-      });
+  const getPdfjsCandidate = () => window.pdfjsLib || window['pdfjs-dist/build/pdf'];
+
+  const configurePdfjs = (lib) => {
+    if (!lib) return null;
+    window.pdfjsLib = lib;
+    if (lib?.GlobalWorkerOptions) {
+      lib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.js";
     }
-    return readyPromise;
+    return lib;
   };
-})();
+
+  const waitForPdfjsLib = (() => {
+    let readyPromise = null;
+    return () => {
+      const immediate = configurePdfjs(getPdfjsCandidate());
+      if (immediate) return Promise.resolve(immediate);
+      if (!readyPromise) {
+        readyPromise = new Promise((resolve, reject) => {
+          let attempts = 0;
+          const maxAttempts = 100;
+          const interval = setInterval(() => {
+            attempts += 1;
+            const candidate = configurePdfjs(getPdfjsCandidate());
+            if (candidate) {
+              clearInterval(interval);
+              resolve(candidate);
+            } else if (attempts >= maxAttempts) {
+              clearInterval(interval);
+              readyPromise = null;
+              reject(new Error('PDF.js failed to load'));
+            }
+          }, 100);
+        });
+      }
+      return readyPromise;
+    };
+  })();
 
 function chunk(arr, size = 10) {
   const out = [];
@@ -731,7 +766,7 @@ function GradingInterface() {
   const [grades, setGrades] = useState({});
   const [currentStudent, setCurrentStudent] = useState(null);
 
-    const [transcript, setTranscript] = useState([]);
+  const [transcript, setTranscript] = useState([]);
   const [showManualTranscriptInput, setShowManualTranscriptInput] = useState(false);
   const [manualTranscriptText, setManualTranscriptText] = useState('');
   const [manualTranscriptError, setManualTranscriptError] = useState(null);
@@ -1994,6 +2029,12 @@ function GradingInterface() {
     return studentOrder.map(id => students.find(s => s.id === id)).filter(Boolean);
   }, [studentOrder, students]);
 
+  const completedCount = useMemo(() => {
+    return Object.values(grades).filter(g => g?.completed).length;
+  }, [grades]);
+
+  const maxPossibleScore = useMemo(() => calculateMaxTotal(), [rubricItems]);
+
   const filteredTeachers = useMemo(() => {
     const q = teacherQuery.toLowerCase();
     return teachers.filter(t => t.name.toLowerCase().includes(q) || (t.email || '').toLowerCase().includes(q));
@@ -2369,7 +2410,7 @@ function GradingInterface() {
                   </div>
                 ))}
               </div>
-              <p className="text-sm text-pacifica-slate mt-2">Total Points: {calculateMaxTotal()}</p>
+              <p className="text-sm text-pacifica-slate mt-2">Total Points: {maxPossibleScore}</p>
             </div>
 
             <div className="mb-6">
@@ -2571,7 +2612,7 @@ function GradingInterface() {
                 )}
                 <button
                   onClick={() => setStep('review')}
-                  disabled={Object.values(grades).filter(g => g.completed).length === 0}
+                  disabled={completedCount === 0}
                   className="px-4 py-2 bg-pacifica-orange text-white font-semibold rounded-lg hover:bg-pacifica-tangerine disabled:bg-pacifica-gray disabled:cursor-not-allowed transition-colors flex items-center gap-2"
                 >
                   <Icon name="clipboard-check" className="w-4 h-4" />
@@ -2847,7 +2888,7 @@ function GradingInterface() {
                             </div>
                             <div className="text-right">
                               <p className={`text-2xl font-bold ${sg.completed ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}>{sg.completed ? total : '--'}</p>
-                              <p className="text-xs text-pacifica-slate">{sg.completed ? `/${calculateMaxTotal()}` : 'Not Graded'}</p>
+                              <p className="text-xs text-pacifica-slate">{sg.completed ? `/${maxPossibleScore}` : 'Not Graded'}</p>
                             </div>
                           </div>
 
@@ -2954,7 +2995,7 @@ function GradingInterface() {
                     ))}
                     <div className="pt-2 border-t border-pacifica-gray flex justify-between">
                       <span className="text-sm font-semibold text-pacifica-navy">Total</span>
-                      <span className="text-sm font-bold text-pacifica-orange">/{calculateMaxTotal()}</span>
+                      <span className="text-sm font-bold text-pacifica-orange">/{maxPossibleScore}</span>
                     </div>
                   </div>
                 </div>
@@ -2966,9 +3007,6 @@ function GradingInterface() {
   }
 
   if (step === 'review') {
-    const completedCount = Object.values(grades).filter(g => g.completed).length;
-    const maxTotal = calculateMaxTotal();
-    
     return (
       <div className="min-h-screen bg-pacifica-gray bg-opacity-10 p-6">
         <div className="max-w-7xl mx-auto">
@@ -2978,7 +3016,7 @@ function GradingInterface() {
                 <h1 className="text-3xl font-bold text-pacifica-navy">Review Grades - {assignmentName}</h1>
                 <p className="text-pacifica-slate mt-1">{selectedTeacher?.name} • {selectedSections.map(s => s.name).join(', ')}</p>
                 <p className="text-sm text-pacifica-slate mt-1">
-                  {completedCount} of {students.length} students graded • Max Points: {maxTotal}
+                  {completedCount} of {students.length} students graded • Max Points: {maxPossibleScore}
                 </p>
               </div>
               <div className="flex flex-col items-end gap-3">
@@ -3171,7 +3209,7 @@ function GradingInterface() {
                       style={{ cursor: 'pointer' }}
                     >
                       <div>Total</div>
-                      <div className="text-xs font-normal text-pacifica-slate mt-1">/ {maxTotal}</div>
+                      <div className="text-xs font-normal text-pacifica-slate mt-1">/ {maxPossibleScore}</div>
                     </th>
                     <th 
                       className={`px-4 py-3 text-left text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === rubricItems.length + 3 ? 'column-header-selected' : ''}`}
