@@ -1,8 +1,0 @@
-# Core PDF extraction
-PyMuPDF
-PyPDF2
-# Airtable and HTTP
-requests
-# Optional OCR dependencies (if you need OCR for scanned PDFs)
-# Pillow
-# pytesseract
