@@ -186,7 +186,7 @@
 <div id="root"></div>
 
 <script type="text/babel" data-presets="env,react">
-const { useState, useEffect, useRef, useMemo } = React;
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
 const WEBHOOK_TIMEOUT_MINUTES = 10;
 const WEBHOOK_TIMEOUT_MS = WEBHOOK_TIMEOUT_MINUTES * 60 * 1000;
@@ -252,6 +252,7 @@ const CONFIG = {
   N8N_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook/voice-grader',
   N8N_TRANSCRIPT_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook/77f1b709-51b2-4d7f-9d99-b9c8bf063725',
   N8N_EMAIL_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook/80869e6a-5041-41e7-a35d-de6da27193e3',
+  MANUAL_TRANSCRIPT_RESULT_PATH: '/manual-transcript-callback',
   TABLES: {
     TEACHERS: 'Teachers',
     SECTIONS: 'Master Sections',
@@ -269,6 +270,31 @@ const CONFIG = {
     RUBRICS: { NAME: 'Rubric Name', TEACHER: 'Teacher', ITEMS: 'Items' }
   }
 };
+
+const MANUAL_TRANSCRIPT_SW_PATH = 'manual-transcript-sw.js';
+
+const registerManualTranscriptServiceWorker = () => {
+  if (typeof window === 'undefined') return;
+  if (!('serviceWorker' in navigator)) {
+    console.warn('[Manual Transcript] Service workers are not supported in this browser.');
+    return;
+  }
+  if (window.location.protocol === 'file:') {
+    console.warn('[Manual Transcript] Service worker disabled while served over file://');
+    return;
+  }
+  navigator.serviceWorker.register(MANUAL_TRANSCRIPT_SW_PATH)
+    .then((registration) => {
+      console.log('[Manual Transcript] Service worker registered', registration.scope);
+    })
+    .catch((err) => {
+      console.error('[Manual Transcript] Failed to register service worker', err);
+    });
+};
+
+if (typeof window !== 'undefined') {
+  registerManualTranscriptServiceWorker();
+}
 
 const Icon = ({ name, className = "w-5 h-5" }) => {
   const ref = React.useRef(null);
@@ -374,6 +400,19 @@ function GradingInterface() {
   const [manualTranscriptText, setManualTranscriptText] = useState('');
   const [manualTranscriptError, setManualTranscriptError] = useState(null);
   const [isSubmittingTranscript, setIsSubmittingTranscript] = useState(false);
+  const manualTranscriptRequestsRef = useRef(new Map());
+  const manualTranscriptInputRef = useRef(null);
+  const [isManualTranscriptListenerReady, setIsManualTranscriptListenerReady] = useState(false);
+  const manualTranscriptCallbackUrl = typeof window !== 'undefined'
+    ? `${window.location.origin}${CONFIG.MANUAL_TRANSCRIPT_RESULT_PATH}`
+    : '';
+  const handleWebhookSuccessRef = useRef(null);
+  const manualTranscriptListenerStatus = useMemo(() => {
+    if (typeof window !== 'undefined' && window.location.protocol === 'file:') {
+      return 'Unavailable on file:// (serve over HTTP/HTTPS)';
+    }
+    return isManualTranscriptListenerReady ? 'Active' : 'Not connected';
+  }, [isManualTranscriptListenerReady]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [editingStudent, setEditingStudent] = useState(null);
@@ -414,6 +453,46 @@ function GradingInterface() {
       setError('Please configure your Airtable API key in the CONFIG section.');
     }
     loadTeachersFromAirtable();
+  }, []);
+
+  useEffect(() => {
+    if (showManualTranscriptInput && manualTranscriptInputRef.current) {
+      manualTranscriptInputRef.current.focus();
+    }
+  }, [showManualTranscriptInput]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!('serviceWorker' in navigator)) {
+      setIsManualTranscriptListenerReady(false);
+      return;
+    }
+    if (window.location.protocol === 'file:') {
+      setIsManualTranscriptListenerReady(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const markReady = () => {
+      if (!cancelled) setIsManualTranscriptListenerReady(true);
+    };
+
+    navigator.serviceWorker.getRegistration(MANUAL_TRANSCRIPT_SW_PATH)
+      .then((registration) => {
+        if (!cancelled && registration) {
+          setIsManualTranscriptListenerReady(true);
+        }
+      })
+      .catch(() => {});
+
+    navigator.serviceWorker.ready
+      .then(markReady)
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -1080,7 +1159,16 @@ function GradingInterface() {
     processSegmentWithN8N(segmentId, chunkNum, blob, entryId, recordingDuration);
   };
 
-  const handleWebhookSuccess = ({ result, entryId, chunkNum = null, recordingDuration = 0, segmentId = null, sourceLabel }) => {
+  const handleWebhookSuccess = ({
+    result,
+    entryId,
+    chunkNum = null,
+    recordingDuration = 0,
+    segmentId = null,
+    sourceLabel,
+    appendTranscript = false,
+    entryProcessingState = 'complete'
+  }) => {
     const label = sourceLabel || (chunkNum !== null ? `Segment ${chunkNum}` : 'Manual Transcript');
     const durationSeconds = recordingDuration ? (recordingDuration / 1000).toFixed(1) : null;
     const headerLabel = durationSeconds ? `${label} (${durationSeconds}s)` : label;
@@ -1179,11 +1267,15 @@ function GradingInterface() {
 
         setTranscript(prev => {
           const filtered = prev.filter(e => e.id !== entryId);
+          const existing = prev.find(e => e.id === entryId);
+          const combinedText = appendTranscript && existing
+            ? `${existing.text}\n${formattedText}`
+            : formattedText;
           return [
             {
               id: entryId,
-              text: formattedText,
-              isProcessing: false,
+              text: combinedText,
+              isProcessing: entryProcessingState !== 'complete',
               segmentNumber: chunkNum,
               timestamp: new Date().toLocaleTimeString()
             },
@@ -1210,11 +1302,16 @@ function GradingInterface() {
       } else {
         setTranscript(prev => {
           const filtered = prev.filter(e => e.id !== entryId);
+          const existing = prev.find(e => e.id === entryId);
+          const baseText = `📍 ${label} - No students matched`;
+          const combinedText = appendTranscript && existing
+            ? `${existing.text}\n${baseText}`
+            : baseText;
           return [
             {
               id: entryId,
-              text: `📍 ${label} - No students matched`,
-              isProcessing: false,
+              text: combinedText,
+              isProcessing: entryProcessingState !== 'complete',
               segmentNumber: chunkNum,
               timestamp: new Date().toLocaleTimeString()
             },
@@ -1231,11 +1328,16 @@ function GradingInterface() {
     } else {
       setTranscript(prev => {
         const filtered = prev.filter(e => e.id !== entryId);
+        const existing = prev.find(e => e.id === entryId);
+        const baseText = `📍 ${label} - Processed without grade data`;
+        const combinedText = appendTranscript && existing
+          ? `${existing.text}\n${baseText}`
+          : baseText;
         return [
           {
             id: entryId,
-            text: `📍 ${label} - Processed without grade data`,
-            isProcessing: false,
+            text: combinedText,
+            isProcessing: entryProcessingState !== 'complete',
             segmentNumber: chunkNum,
             timestamp: new Date().toLocaleTimeString()
           },
@@ -1252,6 +1354,119 @@ function GradingInterface() {
       console.log(`${logPrefix} Processed without grade data`);
     }
   };
+
+  useEffect(() => {
+    handleWebhookSuccessRef.current = handleWebhookSuccess;
+  });
+
+  const processManualTranscriptResult = useCallback((payload) => {
+    if (!payload) return;
+
+    const requestsMap = manualTranscriptRequestsRef.current;
+    const explicitId = payload.requestId || payload.transcriptRequestId || payload.manualTranscriptRequestId;
+    const interpretFinalFlag = (value) => {
+      if (value === undefined || value === null) return false;
+      if (typeof value === 'string') {
+        return value.toLowerCase() === 'true';
+      }
+      return Boolean(value);
+    };
+
+    let targetRequestId = null;
+    if (explicitId && requestsMap.has(explicitId)) {
+      targetRequestId = explicitId;
+    } else if (!explicitId && requestsMap.size === 1) {
+      targetRequestId = Array.from(requestsMap.keys())[0];
+    } else if (explicitId && !requestsMap.has(explicitId)) {
+      console.warn('[Manual Transcript] Received result for unknown requestId', explicitId);
+      return;
+    } else if (!explicitId) {
+      console.warn('[Manual Transcript] Result received without requestId and multiple requests pending.');
+      return;
+    }
+
+    const requestId = targetRequestId;
+    let requestState = requestsMap.get(requestId);
+    if (!requestState) {
+      console.warn('[Manual Transcript] Missing request state for', requestId);
+      return;
+    }
+
+    const rawResult = payload.result !== undefined ? payload.result : payload;
+    const logPrefix = `[Manual Transcript Async ${requestId}]`;
+    const newStudents = normalizeWebhookResult(rawResult, logPrefix);
+
+    if (!Array.isArray(newStudents) || newStudents.length === 0) {
+      const isFinal = interpretFinalFlag(payload?.isFinal ?? payload?.final ?? payload?.done ?? payload?.complete ?? payload?.finished ?? payload?.finalized);
+      if (isFinal) {
+        handleWebhookSuccessRef.current?.({
+          result: [],
+          entryId: requestState.entryId,
+          sourceLabel: payload?.sourceLabel || 'Manual Transcript',
+          appendTranscript: false,
+          entryProcessingState: 'complete'
+        });
+        requestsMap.delete(requestId);
+        setPendingCount(prev => Math.max(0, prev - 1));
+      }
+      return;
+    }
+
+    const aggregated = Array.isArray(requestState.students) ? [...requestState.students] : [];
+
+    newStudents.forEach((student) => {
+      if (!student) return;
+      const matchIndex = aggregated.findIndex(existing => {
+        if (existing.studentId && student.studentId) {
+          return String(existing.studentId) === String(student.studentId);
+        }
+        if (existing.studentName && student.studentName) {
+          return existing.studentName.trim().toLowerCase() === String(student.studentName).trim().toLowerCase();
+        }
+        return false;
+      });
+      if (matchIndex >= 0) {
+        aggregated[matchIndex] = { ...aggregated[matchIndex], ...student };
+      } else {
+        aggregated.push(student);
+      }
+    });
+
+    requestState = { ...requestState, students: aggregated };
+    requestsMap.set(requestId, requestState);
+
+    const isFinal = interpretFinalFlag(payload?.isFinal ?? payload?.final ?? payload?.done ?? payload?.complete ?? payload?.finished ?? payload?.finalized);
+
+    handleWebhookSuccessRef.current?.({
+      result: aggregated,
+      entryId: requestState.entryId,
+      sourceLabel: payload?.sourceLabel || 'Manual Transcript',
+      appendTranscript: false,
+      entryProcessingState: isFinal ? 'complete' : 'pending'
+    });
+
+    if (isFinal) {
+      requestsMap.delete(requestId);
+      setPendingCount(prev => Math.max(0, prev - 1));
+    }
+  }, [setPendingCount]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!('serviceWorker' in navigator)) return;
+
+    const handler = (event) => {
+      const data = event?.data;
+      if (!data || data.type !== 'manual-transcript-result') return;
+      processManualTranscriptResult(data.payload);
+    };
+
+    navigator.serviceWorker.addEventListener('message', handler);
+
+    return () => {
+      navigator.serviceWorker.removeEventListener('message', handler);
+    };
+  }, [processManualTranscriptResult]);
 
   const processSegmentWithN8N = async (segmentId, chunkNum, blob, entryId, recordingDuration) => {
     try {
@@ -1354,6 +1569,22 @@ function GradingInterface() {
       return;
     }
 
+    if (typeof window !== 'undefined') {
+      if (window.location.protocol === 'file:') {
+        setManualTranscriptError('Serve the app over http:// or https:// to submit transcripts.');
+        return;
+      }
+      if (!('serviceWorker' in navigator)) {
+        setManualTranscriptError('This browser does not support the transcript callback listener.');
+        return;
+      }
+    }
+
+    if (!isManualTranscriptListenerReady) {
+      setManualTranscriptError('Transcript listener is still starting up. Please try again in a moment.');
+      return;
+    }
+
     if (!manualTranscriptText.trim()) {
       setManualTranscriptError('Please paste a transcript before submitting.');
       return;
@@ -1362,6 +1593,9 @@ function GradingInterface() {
     const logPrefix = '[Manual Transcript]';
     const entryId = Date.now();
     const timestamp = new Date().toLocaleTimeString();
+    const requestId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `manual-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
     setManualTranscriptError(null);
     setIsSubmittingTranscript(true);
@@ -1377,6 +1611,8 @@ function GradingInterface() {
       ...prev
     ]);
 
+    manualTranscriptRequestsRef.current.set(requestId, { entryId, students: [] });
+
     try {
       const roster = students.map(s => ({
         id: s.id,
@@ -1385,10 +1621,16 @@ function GradingInterface() {
         email: s.email
       }));
 
+      const callbackUrl = manualTranscriptCallbackUrl || (typeof window !== 'undefined'
+        ? `${window.location.origin}${CONFIG.MANUAL_TRANSCRIPT_RESULT_PATH}`
+        : '');
+
       const payload = {
         transcript: {
-          text: manualTranscriptText.trim()
+          text: manualTranscriptText.trim(),
+          requestId
         },
+        callbackUrl,
         session: {
           id: sessionId || '',
           assignment: assignmentName || '',
@@ -1417,19 +1659,25 @@ function GradingInterface() {
         throw new Error(`n8n webhook error (${response.status}): ${errorText}`);
       }
 
-      const result = await response.json();
-      console.log(`${logPrefix} Result:`, result);
+      console.log(`${logPrefix} Upload acknowledged by n8n. Awaiting async results...`);
 
-      handleWebhookSuccess({
-        result,
-        entryId,
-        sourceLabel: 'Manual Transcript'
-      });
+      setTranscript(prev => prev.map(entry =>
+        entry.id === entryId
+          ? {
+              ...entry,
+              text: '📨 Transcript received. Awaiting analysis…',
+              isProcessing: true,
+              timestamp: new Date().toLocaleTimeString()
+            }
+          : entry
+      ));
 
       setManualTranscriptText('');
       setShowManualTranscriptInput(false);
+      console.log(`${logPrefix} Callback URL for results: ${callbackUrl} (requestId: ${requestId})`);
     } catch (err) {
       console.error(`${logPrefix} Processing error:`, err);
+      manualTranscriptRequestsRef.current.delete(requestId);
       const message = err && err.message ? err.message : 'Unknown error';
       const isTimeout = err && err.name === 'AbortError';
       const errorMessage = isTimeout
@@ -1455,8 +1703,12 @@ function GradingInterface() {
       setManualTranscriptError(errorMessage);
     } finally {
       setIsSubmittingTranscript(false);
-      setPendingCount(prev => Math.max(0, prev - 1));
-      console.log(`${logPrefix} Processing complete`);
+      const requestsMap = manualTranscriptRequestsRef.current;
+      const stillPending = requestsMap.has(requestId);
+      if (!stillPending) {
+        setPendingCount(prev => Math.max(0, prev - 1));
+      }
+      console.log(`${logPrefix} Submission complete${manualTranscriptRequestsRef.current.has(requestId) ? ' - awaiting async grades' : ''}`);
     }
   };
 
@@ -1895,7 +2147,18 @@ function GradingInterface() {
       <div className="min-h-screen bg-gradient-to-br from-pacifica-navy to-pacifica-midnight p-8">
         <div className="max-w-2xl mx-auto">
           <div className="bg-white rounded-lg shadow-xl p-8">
-            <button onClick={() => { setStep('teacher-select'); setSelectedTeacher(null); setSections([]); setSelectedSections([]); }} className="mb-4 text-pacifica-orange hover:text-pacifica-tangerine font-medium flex items-center gap-2">
+            <button onClick={() => {
+              setStep('teacher-select');
+              setSelectedTeacher(null);
+              setSections([]);
+              setSelectedSections([]);
+              manualTranscriptRequestsRef.current.clear();
+              setManualTranscriptText('');
+              setManualTranscriptError(null);
+              setShowManualTranscriptInput(false);
+              setIsSubmittingTranscript(false);
+              setPendingCount(0);
+            }} className="mb-4 text-pacifica-orange hover:text-pacifica-tangerine font-medium flex items-center gap-2">
               <Icon name="ArrowLeft" className="w-4 h-4" />
               Back to Teachers
             </button>
@@ -2272,6 +2535,12 @@ function GradingInterface() {
                       setTranscript([]);
                       setRecordingSegments([]);
                       completedRecordingsRef.current = [];
+                      manualTranscriptRequestsRef.current.clear();
+                      setManualTranscriptText('');
+                      setManualTranscriptError(null);
+                      setShowManualTranscriptInput(false);
+                      setIsSubmittingTranscript(false);
+                      setPendingCount(0);
                     }
                   }}
                   className="px-4 py-2 bg-pacifica-slate text-white font-semibold rounded-lg hover:bg-pacifica-midnight transition-colors"
@@ -2435,20 +2704,33 @@ function GradingInterface() {
                 {showManualTranscriptInput && (
                   <div className="mb-4 p-4 border border-pacifica-gray rounded-lg bg-pacifica-gray bg-opacity-10 animate-fadeIn">
                     <label className="block text-sm font-semibold text-pacifica-navy mb-2" htmlFor="manual-transcript-input">
-                      Paste transcript text
+                      Paste or type transcript text
                     </label>
                     <textarea
                       id="manual-transcript-input"
+                      ref={manualTranscriptInputRef}
                       value={manualTranscriptText}
                       onChange={(e) => setManualTranscriptText(e.target.value)}
                       rows={6}
                       className="w-full p-3 border border-pacifica-gray rounded-lg focus:ring-2 focus:ring-pacifica-orange focus:border-pacifica-orange text-sm"
-                      placeholder="Paste transcript content here..."
+                      placeholder="Paste or type transcript content here..."
+                      autoFocus
                       disabled={isSubmittingTranscript}
                     ></textarea>
                     <div className="flex flex-wrap items-center justify-between mt-2 gap-2 text-xs text-pacifica-slate">
                       <span>{manualTranscriptText.length} characters</span>
                       <span>Webhook wait time: up to {WEBHOOK_TIMEOUT_MINUTES} minutes</span>
+                    </div>
+                    <div className="mt-3 space-y-2 text-xs text-pacifica-slate">
+                      <div>
+                        Results callback URL:
+                        <code className="block mt-1 bg-white border border-pacifica-gray rounded px-2 py-1 break-all text-pacifica-navy">
+                          {manualTranscriptCallbackUrl || 'Unavailable'}
+                        </code>
+                      </div>
+                      <p className={`font-medium ${isManualTranscriptListenerReady ? 'text-green-600' : 'text-red-600'}`}>
+                        Listener status: {manualTranscriptListenerStatus}
+                      </p>
                     </div>
                     {manualTranscriptError && (
                       <p className="text-sm text-red-600 mt-2">{manualTranscriptError}</p>
@@ -2760,6 +3042,12 @@ function GradingInterface() {
                             setCurrentStudent(null);
                             setError(null);
                             setSelectedEmailStudentIds([]);
+                            manualTranscriptRequestsRef.current.clear();
+                            setManualTranscriptText('');
+                            setManualTranscriptError(null);
+                            setShowManualTranscriptInput(false);
+                            setIsSubmittingTranscript(false);
+                            setPendingCount(0);
                           }
                         }}
                         className="btn btn-outline"
@@ -3100,6 +3388,12 @@ function GradingInterface() {
             setUploadComplete(false);
             setAssignmentName('');
             setSessionId(null);
+            manualTranscriptRequestsRef.current.clear();
+            setManualTranscriptText('');
+            setManualTranscriptError(null);
+            setShowManualTranscriptInput(false);
+            setIsSubmittingTranscript(false);
+            setPendingCount(0);
           }}
           className="w-full px-4 py-2 bg-pacifica-orange text-white font-semibold rounded-lg hover:bg-pacifica-tangerine"
         >
