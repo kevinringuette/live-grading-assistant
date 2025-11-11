@@ -252,7 +252,7 @@ const CONFIG = {
   N8N_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook/voice-grader',
   N8N_TRANSCRIPT_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook/77f1b709-51b2-4d7f-9d99-b9c8bf063725',
   N8N_EMAIL_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook/80869e6a-5041-41e7-a35d-de6da27193e3',
-  MANUAL_TRANSCRIPT_RESULT_PATH: '/manual-transcript-callback',
+  MANUAL_TRANSCRIPT_RESULT_PATH: '/api/manual-transcript-callback',
   TABLES: {
     TEACHERS: 'Teachers',
     SECTIONS: 'Master Sections',
@@ -363,6 +363,8 @@ function chunk(arr, size = 10) {
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
 }
+
+let manualPollTimer = null;
 
 function GradingInterface() {
   const [step, setStep] = useState('teacher-select');
@@ -1467,6 +1469,69 @@ function GradingInterface() {
       navigator.serviceWorker.removeEventListener('message', handler);
     };
   }, [processManualTranscriptResult]);
+
+  const pollManualTranscriptResults = useCallback(async () => {
+    if (!sessionId) return;
+
+    try {
+      const res = await fetch(`${CONFIG.MANUAL_TRANSCRIPT_RESULT_PATH}?sessionId=${encodeURIComponent(sessionId)}`);
+      if (!res.ok) return;
+
+      const { data = [] } = await res.json();
+      if (!Array.isArray(data) || data.length === 0) return;
+
+      data.forEach((payload) => {
+        const requestsMap = manualTranscriptRequestsRef.current;
+        const requestKey = payload?.requestId || payload?.transcriptRequestId || payload?.manualTranscriptRequestId;
+        const expectsManualFlow = (requestKey && requestsMap.has(requestKey)) || (!requestKey && requestsMap.size === 1);
+
+        if (expectsManualFlow) {
+          processManualTranscriptResult(payload);
+          return;
+        }
+
+        const entryId = `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        handleWebhookSuccessRef.current?.({
+          result: payload,
+          entryId,
+          sourceLabel: payload?.sourceLabel || 'Manual Callback',
+          appendTranscript: false,
+          entryProcessingState: 'complete'
+        });
+      });
+    } catch (err) {
+      console.warn('Manual transcript poll error:', err);
+    }
+  }, [processManualTranscriptResult, sessionId]);
+
+  const stopPollingManual = useCallback(() => {
+    if (manualPollTimer) {
+      clearInterval(manualPollTimer);
+      manualPollTimer = null;
+    }
+  }, []);
+
+  const startPollingManual = useCallback(() => {
+    if (!sessionId) return;
+    stopPollingManual();
+    pollManualTranscriptResults();
+    manualPollTimer = setInterval(() => {
+      pollManualTranscriptResults();
+    }, 2500);
+  }, [pollManualTranscriptResults, sessionId, stopPollingManual]);
+
+  useEffect(() => {
+    if (step === 'grading' && sessionId) {
+      startPollingManual();
+      return () => stopPollingManual();
+    }
+    stopPollingManual();
+    return () => {};
+  }, [sessionId, startPollingManual, step, stopPollingManual]);
+
+  useEffect(() => () => {
+    stopPollingManual();
+  }, [stopPollingManual]);
 
   const processSegmentWithN8N = async (segmentId, chunkNum, blob, entryId, recordingDuration) => {
     try {
@@ -2928,7 +2993,7 @@ function GradingInterface() {
       <div className="min-h-screen bg-pacifica-gray bg-opacity-10 p-6">
         <div className="max-w-7xl mx-auto">
           <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6 mb-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div>
                 <h1 className="text-3xl font-bold text-pacifica-navy">Review Grades - {assignmentName}</h1>
                 <p className="text-pacifica-slate mt-1">{selectedTeacher?.name} • {selectedSections.map(s => s.name).join(', ')}</p>
@@ -2936,7 +3001,7 @@ function GradingInterface() {
                   {completedCount} of {students.length} students graded • Max Points: {maxTotal}
                 </p>
               </div>
-              <div className="flex flex-col items-end gap-3">
+              <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center">
                 {uploadComplete ? (
                   <div className="flex items-center gap-3 bg-green-50 border border-green-300 rounded-lg px-6 py-4">
                     <Icon name="check-circle" className="w-8 h-8 text-green-600" />
@@ -2946,7 +3011,7 @@ function GradingInterface() {
                     </div>
                   </div>
                 ) : (
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                     <button
                       onClick={() => setStep('grading')}
                       className="btn btn-outline"
@@ -2996,8 +3061,8 @@ function GradingInterface() {
                     </button>
                   </div>
                 )}
-                
-                <div className="flex items-center gap-2">
+
+                <div className="flex flex-wrap items-center gap-2">
                   {uploadComplete && (
                     <>
                       <button
@@ -3021,6 +3086,7 @@ function GradingInterface() {
                       <button
                         onClick={() => {
                           if (confirm('Start a new grading session? This will clear all current data.')) {
+                            stopPollingManual();
                             setStep('teacher-select');
                             setSelectedTeacher(null);
                             setSelectedSections([]);
@@ -3076,293 +3142,303 @@ function GradingInterface() {
             </div>
           </div>
 
-          {emailDraftSuccess && (
-            <div className="mb-4 p-3 border border-green-300 bg-green-50 rounded-lg text-green-800 flex items-center gap-2">
-              <Icon name="check-circle" className="w-5 h-5 text-green-600" />
-              <span>Email draft sent successfully. Check your n8n workflow.</span>
-            </div>
-          )}
-
-          {emailDraftError && (
-            <div className="mb-4 p-3 border border-red-300 bg-red-50 rounded-lg text-red-800 flex items-center gap-2">
-              <Icon name="alert-circle" className="w-5 h-5 text-red-600" />
-              <span>{emailDraftError}</span>
-            </div>
-          )}
-
-          <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6 mb-6">
-            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-4">
-              <div>
-                <h2 className="text-lg font-semibold text-pacifica-navy">Choose Students for Email Drafts</h2>
-                <p className="text-sm text-pacifica-slate">Only graded students can receive an email draft.</p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={selectAllEmailRecipients}
-                  className="btn btn-outline"
-                  disabled={students.filter(s => grades[s.id]?.completed).length === 0}
+          <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+            <div className="space-y-6">
+              <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
+                <div className="flex justify-between items-center mb-4">
+                  <h2 className="text-lg font-semibold text-pacifica-navy">Edit Grades Before Uploading</h2>
+                  <div className="text-sm text-pacifica-slate">
+                    Use arrow keys to navigate • Click column headers to select • Ctrl+C to copy column
+                  </div>
+                </div>
+                <div
+                  className="overflow-x-auto"
+                  onKeyDown={handleTableKeyDown}
+                  tabIndex={-1}
+                  ref={tableRef}
                 >
-                  Select All Graded
-                </button>
-                <button
-                  type="button"
-                  onClick={clearEmailRecipients}
-                  className="btn btn-outline"
-                  disabled={selectedEmailStudentIds.length === 0}
-                >
-                  Clear Selection
-                </button>
-              </div>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              {students.map(student => {
-                const gradeRecord = grades[student.id] || {};
-                const graded = !!gradeRecord.completed;
-                const totalScore = graded
-                  ? rubricItems.reduce((sum, item) => sum + (gradeRecord.scores?.[item.name] || 0), 0)
-                  : null;
-                const checked = graded && selectedEmailStudentIds.includes(student.id);
-                return (
-                  <label
-                    key={student.id}
-                    className={`flex items-center justify-between gap-3 border rounded-lg px-4 py-3 transition ${
-                      graded
-                        ? checked
-                          ? 'border-pacifica-orange bg-pacifica-orange/10 shadow-sm'
-                          : 'border-pacifica-gray hover:border-pacifica-orange hover:bg-pacifica-orange/10'
-                        : 'border-pacifica-gray bg-gray-50 opacity-60 cursor-not-allowed'
-                    }`}
-                  >
-                    <div className="min-w-0">
-                      <p className="font-semibold text-pacifica-navy truncate">{student.name}</p>
-                      <p className="text-xs text-pacifica-slate truncate">
-                        {graded
-                          ? `Graded • ${totalScore}/${maxTotal}`
-                          : 'Not graded yet'}
-                      </p>
-                    </div>
-                    <input
-                      type="checkbox"
-                      className="w-5 h-5 text-pacifica-orange rounded"
-                      disabled={!graded}
-                      checked={checked}
-                      onChange={() => handleEmailRecipientToggle(student.id)}
-                    />
-                  </label>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-lg font-semibold text-pacifica-navy">Edit Grades Before Uploading</h2>
-              <div className="text-sm text-pacifica-slate">
-                Use arrow keys to navigate • Click column headers to select • Ctrl+C to copy column
-              </div>
-            </div>
-            <div 
-              className="overflow-x-auto" 
-              onKeyDown={handleTableKeyDown}
-              tabIndex={-1}
-              ref={tableRef}
-            >
-              <table className="w-full spreadsheet-table">
-                <thead>
-                  <tr>
-                    <th 
-                      className={`px-4 py-3 text-left text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === 0 ? 'column-header-selected' : ''}`}
-                      onClick={() => handleColumnHeaderClick(0)}
-                      style={{ cursor: 'pointer' }}
-                    >
-                      Student Name
-                    </th>
-                    <th 
-                      className={`px-4 py-3 text-left text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === 1 ? 'column-header-selected' : ''}`}
-                      onClick={() => handleColumnHeaderClick(1)}
-                      style={{ cursor: 'pointer' }}
-                    >
-                      Status
-                    </th>
-                    {rubricItems.map((item, idx) => (
-                      <th 
-                        key={item.name}
-                        className={`px-4 py-3 text-center text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === idx + 2 ? 'column-header-selected' : ''}`}
-                        onClick={() => handleColumnHeaderClick(idx + 2)}
-                        style={{ cursor: 'pointer' }}
-                      >
-                        <div>{item.name}</div>
-                        <div className="text-xs font-normal text-pacifica-slate mt-1">/ {item.maxPoints}</div>
-                      </th>
-                    ))}
-                    <th 
-                      className={`px-4 py-3 text-center text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === rubricItems.length + 2 ? 'column-header-selected' : ''}`}
-                      onClick={() => handleColumnHeaderClick(rubricItems.length + 2)}
-                      style={{ cursor: 'pointer' }}
-                    >
-                      <div>Total</div>
-                      <div className="text-xs font-normal text-pacifica-slate mt-1">/ {maxTotal}</div>
-                    </th>
-                    <th 
-                      className={`px-4 py-3 text-left text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === rubricItems.length + 3 ? 'column-header-selected' : ''}`}
-                      onClick={() => handleColumnHeaderClick(rubricItems.length + 3)}
-                      style={{ cursor: 'pointer' }}
-                    >
-                      Comments
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {students.map((student, rowIdx) => {
-                    const grade = grades[student.id] || { scores: {}, comments: '', completed: false };
-                    const total = calculateTotal(grade);
-                    const isCompleted = grade.completed;
-                    
-                    return (
-                      <tr key={student.id}>
-                        <td 
-                          className={`px-4 py-2 ${selectedCell?.row === rowIdx && selectedCell?.col === 0 ? 'selected-cell' : selectedColumn === 0 ? 'column-selected' : ''}`}
-                          onClick={() => handleCellClick(rowIdx, 0)}
-                          data-row={rowIdx}
-                          data-col={0}
-                          tabIndex={0}
+                  <table className="w-full spreadsheet-table">
+                    <thead>
+                      <tr>
+                        <th
+                          className={`px-4 py-3 text-left text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === 0 ? 'column-header-selected' : ''}`}
+                          onClick={() => handleColumnHeaderClick(0)}
+                          style={{ cursor: 'pointer' }}
                         >
-                          <div className="cell-content">
-                            <div className="flex items-center">
-                              <div className={`w-8 h-8 rounded-full flex items-center justify-center font-semibold text-xs ${isCompleted ? 'bg-green-100 text-green-600' : 'bg-pacifica-gray bg-opacity-30 text-pacifica-slate'}`}>
-                                {getInitials(student.name)}
+                          Student Name
+                        </th>
+                        <th
+                          className={`px-4 py-3 text-left text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === 1 ? 'column-header-selected' : ''}`}
+                          onClick={() => handleColumnHeaderClick(1)}
+                          style={{ cursor: 'pointer' }}
+                        >
+                          Status
+                        </th>
+                        {rubricItems.map((item, idx) => (
+                          <th
+                            key={item.name}
+                            className={`px-4 py-3 text-center text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === idx + 2 ? 'column-header-selected' : ''}`}
+                            onClick={() => handleColumnHeaderClick(idx + 2)}
+                            style={{ cursor: 'pointer' }}
+                          >
+                            <div>{item.name}</div>
+                            <div className="text-xs font-normal text-pacifica-slate mt-1">/ {item.maxPoints}</div>
+                          </th>
+                        ))}
+                        <th
+                          className={`px-4 py-3 text-center text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === rubricItems.length + 2 ? 'column-header-selected' : ''}`}
+                          onClick={() => handleColumnHeaderClick(rubricItems.length + 2)}
+                          style={{ cursor: 'pointer' }}
+                        >
+                          <div>Total</div>
+                          <div className="text-xs font-normal text-pacifica-slate mt-1">/ {maxTotal}</div>
+                        </th>
+                        <th
+                          className={`px-4 py-3 text-left text-xs font-medium text-pacifica-navy uppercase tracking-wider ${selectedColumn === rubricItems.length + 3 ? 'column-header-selected' : ''}`}
+                          onClick={() => handleColumnHeaderClick(rubricItems.length + 3)}
+                          style={{ cursor: 'pointer' }}
+                        >
+                          Comments
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {students.map((student, rowIdx) => {
+                        const grade = grades[student.id] || { scores: {}, comments: '', completed: false };
+                        const total = calculateTotal(grade);
+                        const isCompleted = grade.completed;
+
+                        return (
+                          <tr key={student.id}>
+                            <td
+                              className={`px-4 py-2 ${selectedCell?.row === rowIdx && selectedCell?.col === 0 ? 'selected-cell' : selectedColumn === 0 ? 'column-selected' : ''}`}
+                              onClick={() => handleCellClick(rowIdx, 0)}
+                              data-row={rowIdx}
+                              data-col={0}
+                              tabIndex={0}
+                            >
+                              <div className="cell-content">
+                                <div className="flex items-center">
+                                  <div className={`w-8 h-8 rounded-full flex items-center justify-center font-semibold text-xs ${isCompleted ? 'bg-green-100 text-green-600' : 'bg-pacifica-gray bg-opacity-30 text-pacifica-slate'}`}>
+                                    {getInitials(student.name)}
+                                  </div>
+                                  <div className="ml-2">
+                                    <div className="text-sm font-medium text-pacifica-navy">{student.name}</div>
+                                    <div className="text-xs text-pacifica-slate">ID: {student.studentId}</div>
+                                  </div>
+                                </div>
                               </div>
-                              <div className="ml-2">
-                                <div className="text-sm font-medium text-pacifica-navy">{student.name}</div>
-                                <div className="text-xs text-pacifica-slate">ID: {student.studentId}</div>
+                            </td>
+                            <td
+                              className={`px-4 py-2 ${selectedCell?.row === rowIdx && selectedCell?.col === 1 ? 'selected-cell' : selectedColumn === 1 ? 'column-selected' : ''}`}
+                              onClick={() => handleCellClick(rowIdx, 1)}
+                              data-row={rowIdx}
+                              data-col={1}
+                              tabIndex={0}
+                            >
+                              <div className="cell-content">
+                                {isCompleted ? (
+                                  <span className="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
+                                    Graded
+                                  </span>
+                                ) : (
+                                  <span className="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-pacifica-gray bg-opacity-30 text-pacifica-slate">
+                                    Not Graded
+                                  </span>
+                                )}
                               </div>
+                            </td>
+                            {rubricItems.map((item, colIdx) => (
+                              <td
+                                key={item.name}
+                                className={`px-4 py-2 text-center ${selectedCell?.row === rowIdx && selectedCell?.col === colIdx + 2 ? 'selected-cell' : selectedColumn === colIdx + 2 ? 'column-selected' : ''}`}
+                                onClick={() => handleCellClick(rowIdx, colIdx + 2)}
+                                data-row={rowIdx}
+                                data-col={colIdx + 2}
+                              >
+                                <input
+                                  type="number"
+                                  value={grade.scores[item.name] ?? ''}
+                                  onChange={(e) => updateScore(student.id, item.name, parseInt(e.target.value) || 0)}
+                                  onFocus={() => setSelectedCell({ row: rowIdx, col: colIdx + 2 })}
+                                  min="0"
+                                  max={item.maxPoints}
+                                  className="text-center"
+                                  style={{ width: '60px', margin: '0 auto', display: 'block' }}
+                                />
+                              </td>
+                            ))}
+                            <td
+                              className={`px-4 py-2 text-center ${selectedCell?.row === rowIdx && selectedCell?.col === rubricItems.length + 2 ? 'selected-cell' : selectedColumn === rubricItems.length + 2 ? 'column-selected' : ''}`}
+                              onClick={() => handleCellClick(rowIdx, rubricItems.length + 2)}
+                              data-row={rowIdx}
+                              data-col={rubricItems.length + 2}
+                              tabIndex={0}
+                            >
+                              <div className="cell-content text-center">
+                                <span className={`text-lg font-bold ${isCompleted ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}>
+                                  {isCompleted ? total : '--'}
+                                </span>
+                              </div>
+                            </td>
+                            <td
+                              className={`px-4 py-2 ${selectedCell?.row === rowIdx && selectedCell?.col === rubricItems.length + 3 ? 'selected-cell' : selectedColumn === rubricItems.length + 3 ? 'column-selected' : ''}`}
+                              onClick={() => handleCellClick(rowIdx, rubricItems.length + 3)}
+                              data-row={rowIdx}
+                              data-col={rubricItems.length + 3}
+                            >
+                              <input
+                                type="text"
+                                value={grade.comments}
+                                onChange={(e) => updateComments(student.id, e.target.value)}
+                                onFocus={() => setSelectedCell({ row: rowIdx, col: rubricItems.length + 3 })}
+                                placeholder="Add comments..."
+                                style={{ width: '100%' }}
+                              />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
+                <h2 className="text-lg font-semibold text-pacifica-navy mb-4">Recording Segments ({recordingSegments.length})</h2>
+                {recordingSegments.length === 0 ? (
+                  <p className="text-sm text-pacifica-gray italic">No recordings available.</p>
+                ) : (
+                  <div>
+                    <div className="flex items-center justify-between mb-4">
+                      <p className="text-sm text-pacifica-slate">{recordingSegments.length} recording(s) available for download</p>
+                      <button
+                        onClick={downloadAllRecordings}
+                        className="px-4 py-2 bg-pacifica-orange text-white rounded-lg hover:bg-pacifica-tangerine flex items-center gap-2"
+                      >
+                        <Icon name="download" className="w-4 h-4" />
+                        Download All as Zip
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                      {recordingSegments.map((segment) => (
+                        <div
+                          key={segment.id}
+                          onClick={() => {
+                            const recording = completedRecordingsRef.current.find(r => r.id === segment.id);
+                            if (recording) downloadRecording(recording);
+                          }}
+                          className={`p-3 rounded-lg border cursor-pointer transition-all hover:shadow-md ${
+                            segment.status === 'completed' ? 'bg-green-50 border-green-300' :
+                            segment.status === 'processing' ? 'bg-pacifica-canary bg-opacity-20 border-pacifica-canary' :
+                            segment.status === 'error' ? 'bg-red-50 border-red-300' :
+                            'bg-pacifica-gray bg-opacity-20 border-pacifica-gray'
+                          }`}
+                          title="Click to download"
+                        >
+                          <div className="flex items-center gap-2">
+                            <Icon name="file-audio" className="w-4 h-4" />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-semibold truncate text-pacifica-navy">
+                                {segment.studentName || `Segment ${segment.chunkNumber}`}
+                              </p>
+                              <p className="text-xs text-pacifica-slate">
+                                {(segment.duration / 1000).toFixed(1)}s • {Math.round(segment.size / 1024)}KB
+                              </p>
                             </div>
                           </div>
-                        </td>
-                        <td 
-                          className={`px-4 py-2 ${selectedCell?.row === rowIdx && selectedCell?.col === 1 ? 'selected-cell' : selectedColumn === 1 ? 'column-selected' : ''}`}
-                          onClick={() => handleCellClick(rowIdx, 1)}
-                          data-row={rowIdx}
-                          data-col={1}
-                          tabIndex={0}
-                        >
-                          <div className="cell-content">
-                            {isCompleted ? (
-                              <span className="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
-                                Graded
-                              </span>
-                            ) : (
-                              <span className="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-pacifica-gray bg-opacity-30 text-pacifica-slate">
-                                Not Graded
-                              </span>
-                            )}
-                          </div>
-                        </td>
-                        {rubricItems.map((item, colIdx) => (
-                          <td 
-                            key={item.name}
-                            className={`px-4 py-2 text-center ${selectedCell?.row === rowIdx && selectedCell?.col === colIdx + 2 ? 'selected-cell' : selectedColumn === colIdx + 2 ? 'column-selected' : ''}`}
-                            onClick={() => handleCellClick(rowIdx, colIdx + 2)}
-                            data-row={rowIdx}
-                            data-col={colIdx + 2}
-                          >
-                            <input
-                              type="number"
-                              value={grade.scores[item.name] ?? ''}
-                              onChange={(e) => updateScore(student.id, item.name, parseInt(e.target.value) || 0)}
-                              onFocus={() => setSelectedCell({ row: rowIdx, col: colIdx + 2 })}
-                              min="0"
-                              max={item.maxPoints}
-                              className="text-center"
-                              style={{ width: '60px', margin: '0 auto', display: 'block' }}
-                            />
-                          </td>
-                        ))}
-                        <td 
-                          className={`px-4 py-2 text-center ${selectedCell?.row === rowIdx && selectedCell?.col === rubricItems.length + 2 ? 'selected-cell' : selectedColumn === rubricItems.length + 2 ? 'column-selected' : ''}`}
-                          onClick={() => handleCellClick(rowIdx, rubricItems.length + 2)}
-                          data-row={rowIdx}
-                          data-col={rubricItems.length + 2}
-                          tabIndex={0}
-                        >
-                          <div className="cell-content text-center">
-                            <span className={`text-lg font-bold ${isCompleted ? 'text-pacifica-navy' : 'text-pacifica-gray'}`}>
-                              {isCompleted ? total : '--'}
-                            </span>
-                          </div>
-                        </td>
-                        <td 
-                          className={`px-4 py-2 ${selectedCell?.row === rowIdx && selectedCell?.col === rubricItems.length + 3 ? 'selected-cell' : selectedColumn === rubricItems.length + 3 ? 'column-selected' : ''}`}
-                          onClick={() => handleCellClick(rowIdx, rubricItems.length + 3)}
-                          data-row={rowIdx}
-                          data-col={rubricItems.length + 3}
-                        >
-                          <input
-                            type="text"
-                            value={grade.comments}
-                            onChange={(e) => updateComments(student.id, e.target.value)}
-                            onFocus={() => setSelectedCell({ row: rowIdx, col: rubricItems.length + 3 })}
-                            placeholder="Add comments..."
-                            style={{ width: '100%' }}
-                          />
-                        </td>
-                      </tr>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              {emailDraftSuccess && (
+                <div className="p-3 border border-green-300 bg-green-50 rounded-lg text-green-800 flex items-center gap-2">
+                  <Icon name="check-circle" className="w-5 h-5 text-green-600" />
+                  <span>Email draft sent successfully. Check your n8n workflow.</span>
+                </div>
+              )}
+
+              {emailDraftError && (
+                <div className="p-3 border border-red-300 bg-red-50 rounded-lg text-red-800 flex items-center gap-2">
+                  <Icon name="alert-circle" className="w-5 h-5 text-red-600" />
+                  <span>{emailDraftError}</span>
+                </div>
+              )}
+
+              <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-4">
+                  <div>
+                    <h2 className="text-lg font-semibold text-pacifica-navy">Choose Students for Email Drafts</h2>
+                    <p className="text-sm text-pacifica-slate">Only graded students can receive an email draft.</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={selectAllEmailRecipients}
+                      className="btn btn-outline"
+                      disabled={students.filter(s => grades[s.id]?.completed).length === 0}
+                    >
+                      Select All Graded
+                    </button>
+                    <button
+                      type="button"
+                      onClick={clearEmailRecipients}
+                      className="btn btn-outline"
+                      disabled={selectedEmailStudentIds.length === 0}
+                    >
+                      Clear Selection
+                    </button>
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  {students.map(student => {
+                    const gradeRecord = grades[student.id] || {};
+                    const graded = !!gradeRecord.completed;
+                    const totalScore = graded
+                      ? rubricItems.reduce((sum, item) => sum + (gradeRecord.scores?.[item.name] || 0), 0)
+                      : null;
+                    const checked = graded && selectedEmailStudentIds.includes(student.id);
+                    const baseClasses = 'flex items-start gap-3 border rounded-lg px-4 py-3 transition';
+                    const stateClasses = graded
+                      ? checked
+                        ? 'border-pacifica-orange bg-pacifica-orange/10 shadow-sm'
+                        : 'border-pacifica-gray hover:border-pacifica-orange hover:bg-pacifica-orange/10'
+                      : 'border-pacifica-gray bg-gray-50 opacity-60 cursor-not-allowed';
+
+                    return (
+                      <label
+                        key={student.id}
+                        className={`${baseClasses} ${stateClasses}`}
+                      >
+                        <input
+                          type="checkbox"
+                          className="mt-1 h-5 w-5 text-pacifica-orange rounded border-pacifica-gray"
+                          disabled={!graded}
+                          checked={checked}
+                          onChange={() => handleEmailRecipientToggle(student.id)}
+                        />
+                        <div className="flex-1 min-w-0">
+                          <p className="font-semibold text-pacifica-navy truncate">{student.name}</p>
+                          <p className="text-xs text-pacifica-slate truncate">
+                            {graded
+                              ? `Graded • ${totalScore}/${maxTotal}`
+                              : 'Not graded yet'}
+                          </p>
+                          {student.email && (
+                            <p className="text-xs text-pacifica-slate truncate mt-1">{student.email}</p>
+                          )}
+                        </div>
+                      </label>
                     );
                   })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div className="mt-6 bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
-            <h2 className="text-lg font-semibold text-pacifica-navy mb-4">Recording Segments ({recordingSegments.length})</h2>
-            {recordingSegments.length === 0 ? (
-              <p className="text-sm text-pacifica-gray italic">No recordings available.</p>
-            ) : (
-              <div>
-                <div className="flex items-center justify-between mb-4">
-                  <p className="text-sm text-pacifica-slate">{recordingSegments.length} recording(s) available for download</p>
-                  <button
-                    onClick={downloadAllRecordings}
-                    className="px-4 py-2 bg-pacifica-orange text-white rounded-lg hover:bg-pacifica-tangerine flex items-center gap-2"
-                  >
-                    <Icon name="download" className="w-4 h-4" />
-                    Download All as Zip
-                  </button>
-                </div>
-                <div className="grid grid-cols-4 gap-3">
-                  {recordingSegments.map((segment) => (
-                    <div
-                      key={segment.id}
-                      onClick={() => {
-                        const recording = completedRecordingsRef.current.find(r => r.id === segment.id);
-                        if (recording) downloadRecording(recording);
-                      }}
-                      className={`p-3 rounded-lg border cursor-pointer transition-all hover:shadow-md ${
-                        segment.status === 'completed' ? 'bg-green-50 border-green-300' :
-                        segment.status === 'processing' ? 'bg-pacifica-canary bg-opacity-20 border-pacifica-canary' :
-                        segment.status === 'error' ? 'bg-red-50 border-red-300' :
-                        'bg-pacifica-gray bg-opacity-20 border-pacifica-gray'
-                      }`}
-                      title="Click to download"
-                    >
-                      <div className="flex items-center gap-2">
-                        <Icon name="file-audio" className="w-4 h-4" />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-semibold truncate text-pacifica-navy">
-                            {segment.studentName || `Segment ${segment.chunkNumber}`}
-                          </p>
-                          <p className="text-xs text-pacifica-slate">
-                            {(segment.duration / 1000).toFixed(1)}s • {Math.round(segment.size / 1024)}KB
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
                 </div>
               </div>
-            )}
+            </div>
           </div>
         </div>
       </div>
@@ -3377,6 +3453,7 @@ function GradingInterface() {
         <button
           onClick={() => {
             console.log('Resetting to teacher-select');
+            stopPollingManual();
             setStep('teacher-select');
             setSelectedTeacher(null);
             setSelectedSections([]);
