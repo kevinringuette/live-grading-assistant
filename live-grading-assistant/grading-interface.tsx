@@ -322,19 +322,31 @@ export default function GradingInterface() {
     }
   };
 
+  const normalizeScoreValue = (value) => {
+    const parsed = parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const normalizeScores = (scores = {}) => {
+    return Object.fromEntries(
+      Object.entries(scores).map(([key, value]) => [key, normalizeScoreValue(value)])
+    );
+  };
+
   const updateGradesFromN8N = (result) => {
     const { studentId, studentName, scores, comments } = result;
-    
+    const normalizedScores = normalizeScores(scores);
+
     setCurrentStudent(studentName);
     setTranscript(prev => [...prev, {
-      text: `${studentName}. ${Object.entries(scores).map(([key, val]) => `${key} ${val}`).join(', ')}. ${comments}`,
+      text: `${studentName}. ${Object.entries(normalizedScores).map(([key, val]) => `${key} ${val}`).join(', ')}. ${comments}`,
       timestamp: new Date().toISOString()
     }]);
-    
+
     setGrades(prev => ({
       ...prev,
       [studentId]: {
-        scores: scores,
+        scores: normalizedScores,
         comments: comments,
         completed: true
       }
@@ -404,7 +416,7 @@ export default function GradingInterface() {
           
           // Add individual rubric scores as fields
           rubricItems.forEach(item => {
-            fields[item.name] = data.scores[item.name] || 0;
+            fields[item.name] = normalizeScoreValue(data.scores[item.name]);
           });
           
           return { fields };
@@ -464,11 +476,11 @@ export default function GradingInterface() {
 
   const calculateTotal = (studentGrades) => {
     if (!studentGrades.scores) return 0;
-    return Object.values(studentGrades.scores).reduce((sum, score) => sum + (score || 0), 0);
+    return Object.values(studentGrades.scores).reduce((sum, score) => sum + normalizeScoreValue(score), 0);
   };
 
   const calculateMaxTotal = () => {
-    return rubricItems.reduce((sum, item) => sum + (item.maxPoints || 0), 0);
+    return rubricItems.reduce((sum, item) => sum + normalizeScoreValue(item.maxPoints), 0);
   };
 
   const getInitials = (name) => {
@@ -477,7 +489,8 @@ export default function GradingInterface() {
 
   const updateScore = (studentId, rubricItem, newScore) => {
     const maxPoints = rubricItems.find(item => item.name === rubricItem)?.maxPoints || 0;
-    const validScore = Math.max(0, Math.min(newScore, maxPoints));
+    const numericScore = normalizeScoreValue(newScore);
+    const validScore = Math.max(0, Math.min(numericScore, maxPoints));
     
     setGrades(prev => ({
       ...prev,
@@ -678,7 +691,11 @@ export default function GradingInterface() {
                     <input
                       type="number"
                       value={item.maxPoints}
-                      onChange={(e) => updateRubricItem(index, 'maxPoints', parseInt(e.target.value) || 0)}
+                      step="any"
+                      onChange={(e) => {
+                        const parsed = parseFloat(e.target.value);
+                        updateRubricItem(index, 'maxPoints', Number.isFinite(parsed) ? parsed : 0);
+                      }}
                       placeholder="Points"
                       className="w-24 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                     />
@@ -905,7 +922,7 @@ export default function GradingInterface() {
                       <div className="grid grid-cols-4 gap-2 mb-3">
                         {rubricItems.map(item => {
                           const isEditing = editingStudent === student.id && editingField === item.name;
-                          const score = studentGrades.scores[item.name] || 0;
+                          const score = normalizeScoreValue(studentGrades.scores[item.name]);
                           
                           return (
                             <div key={item.name} className="text-center p-2 bg-white rounded border border-gray-200">
@@ -914,7 +931,11 @@ export default function GradingInterface() {
                                 <input
                                   type="number"
                                   value={score}
-                                  onChange={(e) => updateScore(student.id, item.name, parseInt(e.target.value) || 0)}
+                                  step="any"
+                                  onChange={(e) => {
+                                    const parsed = parseFloat(e.target.value);
+                                    updateScore(student.id, item.name, Number.isFinite(parsed) ? parsed : 0);
+                                  }}
                                   onBlur={() => {
                                     setEditingStudent(null);
                                     setEditingField(null);
