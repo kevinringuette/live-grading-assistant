@@ -931,9 +931,9 @@ export default function GradingInterface() {
                               <p className="text-xs text-gray-600 truncate mb-1">{item.name}</p>
                               {isEditing ? (
                                 <input
-                                  type="number"
+                                  type="text"
+                                  inputMode="decimal"
                                   value={isActiveEdit ? editingScoreValue : (Number.isFinite(score) ? String(score) : '')}
-                                  step="any"
                                   onChange={(e) => {
                                     setEditingScoreValue(e.target.value);
                                   }}
@@ -974,7 +974,7 @@ export default function GradingInterface() {
                                   }`}
                                   title="Click to edit"
                                 >
-                                  {score || '--'}
+                                  {Number.isFinite(score) ? score : '--'}
                                 </p>
                               )}
                               <p className="text-xs text-gray-500">/ {item.maxPoints}</p>
