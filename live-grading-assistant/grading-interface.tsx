@@ -86,6 +86,7 @@ export default function GradingInterface() {
   const [audioChunks, setAudioChunks] = useState([]);
   const [processingAudio, setProcessingAudio] = useState(false);
   const [sessionId, setSessionId] = useState(null);
+  const [editingScoreValue, setEditingScoreValue] = useState('');
 
   // Check configuration on mount
   useEffect(() => {
@@ -923,6 +924,7 @@ export default function GradingInterface() {
                         {rubricItems.map(item => {
                           const isEditing = editingStudent === student.id && editingField === item.name;
                           const score = normalizeScoreValue(studentGrades.scores[item.name]);
+                          const isActiveEdit = isEditing && editingScoreValue !== '';
                           
                           return (
                             <div key={item.name} className="text-center p-2 bg-white rounded border border-gray-200">
@@ -930,20 +932,25 @@ export default function GradingInterface() {
                               {isEditing ? (
                                 <input
                                   type="number"
-                                  value={score}
+                                  value={isActiveEdit ? editingScoreValue : (Number.isFinite(score) ? String(score) : '')}
                                   step="any"
                                   onChange={(e) => {
-                                    const parsed = parseFloat(e.target.value);
-                                    updateScore(student.id, item.name, Number.isFinite(parsed) ? parsed : 0);
+                                    setEditingScoreValue(e.target.value);
                                   }}
                                   onBlur={() => {
+                                    const parsed = parseFloat(editingScoreValue);
+                                    updateScore(student.id, item.name, Number.isFinite(parsed) ? parsed : 0);
                                     setEditingStudent(null);
                                     setEditingField(null);
+                                    setEditingScoreValue('');
                                   }}
                                   onKeyDown={(e) => {
                                     if (e.key === 'Enter') {
+                                      const parsed = parseFloat(editingScoreValue);
+                                      updateScore(student.id, item.name, Number.isFinite(parsed) ? parsed : 0);
                                       setEditingStudent(null);
                                       setEditingField(null);
+                                      setEditingScoreValue('');
                                     }
                                   }}
                                   min="0"
@@ -952,10 +959,15 @@ export default function GradingInterface() {
                                   className="w-full text-lg font-semibold text-center border border-blue-500 rounded px-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
                                 />
                               ) : (
-                                <p 
+                                <p
                                   onClick={() => {
                                     setEditingStudent(student.id);
                                     setEditingField(item.name);
+                                    setEditingScoreValue(
+                                      Number.isFinite(score)
+                                        ? String(score)
+                                        : ''
+                                    );
                                   }}
                                   className={`text-lg font-semibold cursor-pointer hover:bg-blue-50 rounded px-1 ${
                                     studentGrades.completed ? 'text-gray-900' : 'text-gray-400'
