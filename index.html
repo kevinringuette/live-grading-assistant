@@ -310,7 +310,7 @@
         GRADES: { ASSIGNMENT: 'Assignment', STUDENT: 'Student', COMMENTS: 'Comments', FINAL_GRADE: 'Final Grade', SECTION: 'Section' },
         GRADE_SCORES: { GRADE: 'Grade', LABEL: 'Label', SCORE: 'Score', MAX: 'Max Points' },
         RUBRICS: { NAME: 'Rubric Name', TEACHER: 'Teacher', ITEMS: 'Items' },
-        VOICE_GRADER: { ASSIGNMENT_NAME: 'Assignment Name', RUBRIC: 'Rubric' },
+        VOICE_GRADER: { ASSIGNMENT_NAME: 'Assignment Name', RUBRIC: 'Rubric', TEACHER: 'Teacher', SECTIONS: 'Sections' },
         FINAL_GRADES: {
           NAME: 'Name',
           STUDENT: 'Student',
@@ -1189,35 +1189,66 @@
         setError(null);
 
         try {
-          const payload = {
-            teacherId: selectedTeacher?.id,
-            sectionIds: selectedSections.map(s => s.id),
-            assignmentName: assignmentName,
-            rubricItems: rubricItems
-          };
-
-          // 1. Create Assignment
-          console.log('Creating assignment in n8n...');
-          const result = await n8nRequest(CONFIG.N8N_ASSIGNMENT_WEBHOOK_URL, payload);
-          console.log('n8n assignment response:', result);
-
+          // Check if we should reuse an existing assignment from the dropdown
           let newAssignmentId = null;
+          let isReusedAssignment = false;
+          const selectedSectionIds = selectedSections.map(s => s.id).sort();
 
-          // Handle array response from n8n (as per user spec)
-          if (Array.isArray(result) && result.length > 0 && result[0].id) {
-            newAssignmentId = result[0].id;
-          } else if (result && result.id) {
-            // Fallback for object format
-            newAssignmentId = result.id;
+          if (selectedVoiceAssignmentId) {
+            const selectedAssignment = voiceGraderAssignments.find(a => a.id === selectedVoiceAssignmentId);
+
+            if (selectedAssignment) {
+              // Check if the assignment name, teacher, and sections match
+              const nameMatches = selectedAssignment.name === assignmentName;
+              const teacherMatches = selectedAssignment.teacherId === selectedTeacher?.id;
+              const selectedAssignmentSectionIds = (selectedAssignment.sectionIds || []).sort();
+              const sectionsMatch = JSON.stringify(selectedAssignmentSectionIds) === JSON.stringify(selectedSectionIds);
+
+              if (nameMatches && teacherMatches && sectionsMatch) {
+                // Reuse the existing assignment
+                console.log('Reusing existing assignment from dropdown:', selectedAssignment.id);
+                newAssignmentId = selectedAssignment.id;
+                isReusedAssignment = true;
+                setAssignmentRecordId(newAssignmentId);
+              } else {
+                console.log('Assignment context changed - creating new assignment');
+                console.log('Name match:', nameMatches, 'Teacher match:', teacherMatches, 'Sections match:', sectionsMatch);
+              }
+            }
+          }
+
+          // If we didn't reuse an existing assignment, create a new one
+          if (!newAssignmentId) {
+            const payload = {
+              teacherId: selectedTeacher?.id,
+              sectionIds: selectedSections.map(s => s.id),
+              assignmentName: assignmentName,
+              rubricItems: rubricItems
+            };
+
+            // 1. Create Assignment
+            console.log('Creating assignment in n8n...');
+            console.log('Payload:', JSON.stringify(payload, null, 2));
+            console.log('Section IDs being sent:', payload.sectionIds);
+            const result = await n8nRequest(CONFIG.N8N_ASSIGNMENT_WEBHOOK_URL, payload);
+            console.log('n8n assignment response:', result);
+
+            // Handle array response from n8n (as per user spec)
+            if (Array.isArray(result) && result.length > 0 && result[0].id) {
+              newAssignmentId = result[0].id;
+            } else if (result && result.id) {
+              // Fallback for object format
+              newAssignmentId = result.id;
+            }
           }
 
           if (newAssignmentId) {
-            console.log(`Assignment created with ID: ${newAssignmentId}`);
+            console.log(`Using assignment ID: ${newAssignmentId}`);
             setAssignmentRecordId(newAssignmentId);
 
-            // 2. Send Rubric Items linked to this Assignment
-            // User requested to use "Create rubric n8n post" with the assignment ID
-            if (CONFIG.N8N_RUBRIC_ITEMS_WEBHOOK_URL) {
+            // 2. Send Rubric Items linked to this Assignment (only for new assignments)
+            // For reused assignments, rubric items should already exist
+            if (!isReusedAssignment && CONFIG.N8N_RUBRIC_ITEMS_WEBHOOK_URL) {
               console.log('Sending rubric items to n8n...');
               const rubricResponse = await n8nRequest(CONFIG.N8N_RUBRIC_ITEMS_WEBHOOK_URL, {
                 assignmentId: newAssignmentId,
@@ -1249,6 +1280,8 @@
               } else {
                 console.warn('Unexpected rubric response format:', rubricResponse);
               }
+            } else if (isReusedAssignment) {
+              console.log('Reusing existing assignment - skipping rubric item creation');
             } else {
               console.warn('N8N_RUBRIC_ITEMS_WEBHOOK_URL not configured. Skipping rubric sync.');
             }
@@ -1306,6 +1339,8 @@
           teacherId: selectedTeacher?.id
         };
 
+        console.log(`Saving grade for ${student.name} with ${payload.sectionIds.length} section(s):`, payload.sectionIds);
+
         try {
           await n8nRequest(CONFIG.N8N_GRADE_UPDATE_WEBHOOK_URL, payload);
           console.log(`Auto-save successful for ${student.name}`);
@@ -1331,7 +1366,9 @@
           const assignments = (response.records || []).map(record => ({
             id: record.id,
             name: record.fields[CONFIG.FIELDS.VOICE_GRADER.ASSIGNMENT_NAME],
-            items: normalizeRubricItems(record.fields[CONFIG.FIELDS.VOICE_GRADER.RUBRIC])
+            items: normalizeRubricItems(record.fields[CONFIG.FIELDS.VOICE_GRADER.RUBRIC]),
+            teacherId: record.fields[CONFIG.FIELDS.VOICE_GRADER.TEACHER]?.[0], // Teacher is a linked record (array)
+            sectionIds: record.fields[CONFIG.FIELDS.VOICE_GRADER.SECTIONS] || [] // Sections is a linked record (array)
           })).filter(record => !!record.name)
             .sort((a, b) => a.name.localeCompare(b.name));
           setVoiceGraderAssignments(assignments);
@@ -2838,6 +2875,8 @@
               sectionIds: selectedSections.map(s => s.id),
               teacherId: selectedTeacher?.id
             };
+
+            console.log(`Uploading grade ${i + 1}/${completedGrades.length} with ${payload.sectionIds.length} section(s):`, payload.sectionIds);
 
             await n8nRequest(CONFIG.N8N_GRADE_UPDATE_WEBHOOK_URL, payload);
 
