@@ -59,8 +59,9 @@ const CONFIG = {
     Voice_Grader: {
       ASSIGNMENT_NAME: 'Assignment Name',
       TEACHER: 'Teacher',
-      RUBRIC: 'Rubric'
-    }    
+      RUBRIC: 'Rubric',
+      SECTIONS: 'Master Sections'
+    }
   }
 };
 
@@ -144,16 +145,26 @@ const getRubricSignature = (items: any) => {
 };
 
 const getUniqueRubricsByItems = (rubrics = []) => {
-  const seen = new Set();
+  const signatureToIndex = new Map();
   const unique = [];
 
   rubrics.forEach(rubric => {
     const normalizedItems = normalizeRubricItems(rubric.items);
     if (normalizedItems.length === 0) return; // skip empty/invalid rubrics
     const signature = getRubricSignature(normalizedItems);
-    if (!seen.has(signature)) {
-      seen.add(signature);
+
+    if (!signatureToIndex.has(signature)) {
+      signatureToIndex.set(signature, unique.length);
       unique.push({ ...rubric, items: normalizedItems });
+    } else {
+      const idx = signatureToIndex.get(signature);
+      const existing = unique[idx];
+      const existingSectionCount = existing.sectionIds?.length || 0;
+      const newSectionCount = rubric.sectionIds?.length || 0;
+      const shouldReplace = newSectionCount > existingSectionCount || (!existing.assignmentName && rubric.assignmentName);
+      if (shouldReplace) {
+        unique[idx] = { ...rubric, items: normalizedItems };
+      }
     }
   });
 
@@ -172,7 +183,7 @@ export default function GradingInterface() {
   const [teachers, setTeachers] = useState([]);
   const [selectedTeacher, setSelectedTeacher] = useState(null);
   const [sections, setSections] = useState([]);
-  const [selectedSection, setSelectedSection] = useState(null);
+  const [selectedSections, setSelectedSections] = useState([]);
   const [students, setStudents] = useState([]);
   
   // Assignment setup
@@ -202,6 +213,7 @@ export default function GradingInterface() {
   const [audioChunks, setAudioChunks] = useState([]);
   const [processingAudio, setProcessingAudio] = useState(false);
   const [sessionId, setSessionId] = useState(null);
+  const [activeAssignmentId, setActiveAssignmentId] = useState<string | null>(null);
   const teacherRubricOptions = useMemo(() => {
     // Only show rubrics that belong to the currently selected teacher; do not fall back to all teachers
     const source = selectedTeacher ? savedRubrics : allRubrics;
@@ -292,6 +304,8 @@ export default function GradingInterface() {
 
   const selectTeacher = async (teacher) => {
     setSelectedTeacher(teacher);
+    setSelectedSections([]);
+    setActiveAssignmentId(null);
     setLoading(true);
     setStep('class-select');
     setError(null);
@@ -337,40 +351,48 @@ export default function GradingInterface() {
     setSelectedRubricOption('');
   }, [selectedTeacher]);
 
-  const selectSection = async (section) => {
-    setSelectedSection(section);
+  useEffect(() => {
+    setActiveAssignmentId(null);
+  }, [assignmentName]);
+
+  const loadStudentsForSections = async (sectionsToLoad) => {
     setLoading(true);
-    setStep('setup');
     setError(null);
-    
+
     try {
-      // Get section details to retrieve student IDs
-      const sectionData = await airtableRequest(`${CONFIG.TABLES.SECTIONS}/${section.id}`);
-      const studentIds = sectionData.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER] || [];
-      
-      if (studentIds.length === 0) {
-        setError('No students found in this section');
+      // Fetch section details and collect unique student IDs
+      const sectionDetails = await Promise.all(
+        sectionsToLoad.map(section => airtableRequest(`${CONFIG.TABLES.SECTIONS}/${section.id}`))
+      );
+
+      const uniqueStudentIds = new Set<string>();
+      sectionDetails.forEach(detail => {
+        const studentIds = detail.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER] || [];
+        studentIds.forEach(id => uniqueStudentIds.add(id));
+      });
+
+      if (uniqueStudentIds.size === 0) {
+        setError('No students found in the selected section(s)');
         setStudents([]);
         setLoading(false);
         return;
       }
-      
-      // Fetch all students
-      const studentsPromises = studentIds.map(studentId =>
-        airtableRequest(`${CONFIG.TABLES.STUDENTS}/${studentId}`)
+
+      const studentsData = await Promise.all(
+        Array.from(uniqueStudentIds).map(studentId =>
+          airtableRequest(`${CONFIG.TABLES.STUDENTS}/${studentId}`)
+        )
       );
-      
-      const studentsData = await Promise.all(studentsPromises);
+
       const studentsList = studentsData.map(data => ({
         id: data.id,
         name: data.fields[CONFIG.FIELDS.STUDENTS.NAME],
         email: data.fields[CONFIG.FIELDS.STUDENTS.EMAIL],
         studentId: data.fields[CONFIG.FIELDS.STUDENTS.ID]?.toString() || 'N/A'
       }));
-      
+
       setStudents(studentsList);
-      
-      // Initialize empty grades
+
       const initialGrades = {};
       studentsList.forEach(student => {
         initialGrades[student.id] = {
@@ -380,13 +402,31 @@ export default function GradingInterface() {
         };
       });
       setGrades(initialGrades);
-      
     } catch (err) {
       console.error('Error loading students:', err);
       setError('Failed to load students. Check console for details.');
     } finally {
       setLoading(false);
     }
+  };
+
+  const toggleSectionSelection = (section) => {
+    setActiveAssignmentId(null);
+    setSelectedSections(prev => {
+      const exists = prev.find(s => s.id === section.id);
+      if (exists) return prev.filter(s => s.id !== section.id);
+      return [...prev, section];
+    });
+  };
+
+  const proceedWithSections = async () => {
+    if (selectedSections.length === 0) {
+      alert('Please choose at least one section');
+      return;
+    }
+
+    setStep('setup');
+    await loadStudentsForSections(selectedSections);
   };
 
   // ============================================================================
@@ -428,7 +468,7 @@ export default function GradingInterface() {
         formData.append('audio', audioBlob);
         formData.append('sessionId', sessionId);
         formData.append('teacherId', selectedTeacher.id);
-        formData.append('sectionId', selectedSection.id);
+        formData.append('sectionIds', JSON.stringify(selectedSections.map(s => s.id)));
         formData.append('assignmentName', assignmentName);
         formData.append('rubricItems', JSON.stringify(rubricItems));
         formData.append('students', JSON.stringify(students));
@@ -592,12 +632,28 @@ export default function GradingInterface() {
           const teacherEmails = record.fields['Teacher Email'] || [];
           const teacherNamesExtra = Array.isArray(teacherEmails) ? teacherEmails.map(e => String(e)) : [];
 
+          const sectionFieldCandidates = [
+            vgFields.SECTIONS,
+            CONFIG.FIELDS.TEACHERS.SECTIONS,
+            'Sections',
+            'Master Sections',
+            'Class Sections'
+          ].filter(Boolean);
+          const sectionIds = sectionFieldCandidates.reduce((acc, fieldName) => {
+            if (acc.length > 0) return acc;
+            const val = record.fields[fieldName];
+            if (Array.isArray(val)) return val;
+            return acc;
+          }, [] as string[]);
+
           return {
             id: record.id,
             name: record.fields[vgFields.ASSIGNMENT_NAME] || record.fields[CONFIG.FIELDS.RUBRICS.NAME] || 'Unnamed',
+            assignmentName: record.fields[vgFields.ASSIGNMENT_NAME] || '',
             items,
             teacherIds,
-            teacherNames: [...teacherNamesFromField, ...teacherNamesExtra]
+            teacherNames: [...teacherNamesFromField, ...teacherNamesExtra],
+            sectionIds
           };
         })
         .filter(Boolean);
@@ -646,6 +702,7 @@ export default function GradingInterface() {
   const loadRubric = (rubric) => {
     const safeItems = Array.isArray(rubric.items) ? rubric.items : normalizeRubricItems(rubric.items);
     setRubricItems(safeItems);
+    maybeReuseAssignmentRecord(rubric);
     if (rubric?.id && teacherRubricOptions.some(r => r.id === rubric.id)) {
       setSelectedRubricOption(rubric.id);
     }
@@ -658,6 +715,57 @@ export default function GradingInterface() {
     const selected = teacherRubricOptions.find(r => r.id === rubricId);
     if (selected) {
       loadRubric(selected);
+    }
+  };
+
+  const normalizeAssignment = (name: string) => (name || '').trim().toLowerCase();
+
+  const sectionsMatch = (a: string[], b: string[]) => {
+    if (a.length !== b.length) return false;
+    const setA = new Set(a);
+    return b.every(id => setA.has(id));
+  };
+
+  const maybeReuseAssignmentRecord = (rubric) => {
+    const currentSections = selectedSections.map(s => s.id);
+    const recordSections = Array.isArray(rubric.sectionIds) ? rubric.sectionIds : [];
+    const teacherMatches = (rubric.teacherIds || []).includes(selectedTeacher?.id);
+    const assignmentMatches = normalizeAssignment(assignmentName) === normalizeAssignment(rubric.assignmentName || rubric.name);
+
+    if (teacherMatches && assignmentMatches && currentSections.length > 0 && sectionsMatch(currentSections, recordSections)) {
+      setActiveAssignmentId(rubric.id);
+    } else {
+      setActiveAssignmentId(null);
+    }
+  };
+
+  const upsertVoiceGraderRecord = async () => {
+    if (!selectedTeacher) return;
+    const vgFields = CONFIG.FIELDS.Voice_Grader;
+    const sectionFieldName = vgFields.SECTIONS || CONFIG.FIELDS.TEACHERS.SECTIONS || 'Master Sections';
+    const fields: Record<string, any> = {
+      [vgFields.ASSIGNMENT_NAME]: assignmentName,
+      [vgFields.TEACHER]: [selectedTeacher.id],
+      [vgFields.RUBRIC]: JSON.stringify(rubricItems),
+      [sectionFieldName]: selectedSections.map(s => s.id)
+    };
+
+    try {
+      if (activeAssignmentId) {
+        const updated = await airtableRequest(`${CONFIG.TABLES.VOICE_GRADER}/${activeAssignmentId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ fields })
+        });
+        if (updated?.id) setActiveAssignmentId(updated.id);
+      } else {
+        const created = await airtableRequest(CONFIG.TABLES.VOICE_GRADER, {
+          method: 'POST',
+          body: JSON.stringify({ fields })
+        });
+        if (created?.id) setActiveAssignmentId(created.id);
+      }
+    } catch (err) {
+      console.error('Error syncing Voice Grader record:', err);
     }
   };
 
@@ -711,7 +819,7 @@ export default function GradingInterface() {
     setRubricItems(updated);
   };
 
-  const startGrading = () => {
+  const startGrading = async () => {
     if (!assignmentName.trim()) {
       alert('Please enter an assignment name');
       return;
@@ -720,6 +828,9 @@ export default function GradingInterface() {
       alert('Please fill in all rubric item names');
       return;
     }
+    setLoading(true);
+    await upsertVoiceGraderRecord();
+    setLoading(false);
     setStep('grading');
   };
 
@@ -865,21 +976,37 @@ export default function GradingInterface() {
               </div>
             ) : (
               <div className="space-y-3">
-                {sections.map(section => (
-                  <button
-                    key={section.id}
-                    onClick={() => selectSection(section)}
-                    className="w-full text-left p-4 border border-gray-200 rounded-lg hover:border-blue-400 hover:bg-blue-50 transition-all"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="font-semibold text-gray-900">{section.name}</p>
-                        <p className="text-sm text-gray-500">{section.studentCount} students</p>
+                {sections.map(section => {
+                  const isSelected = selectedSections.some(s => s.id === section.id);
+                  return (
+                    <button
+                      key={section.id}
+                      onClick={() => toggleSectionSelection(section)}
+                      className={`w-full text-left p-4 border rounded-lg transition-all ${
+                        isSelected
+                          ? 'border-blue-500 bg-blue-50'
+                          : 'border-gray-200 hover:border-blue-400 hover:bg-blue-50'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="font-semibold text-gray-900">{section.name}</p>
+                          <p className="text-sm text-gray-500">{section.studentCount} students</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm text-gray-600">Select</span>
+                          <input type="checkbox" readOnly checked={isSelected} className="h-4 w-4" />
+                        </div>
                       </div>
-                      <ChevronRight className="w-5 h-5 text-blue-600" />
-                    </div>
-                  </button>
-                ))}
+                    </button>
+                  );
+                })}
+                <button
+                  onClick={proceedWithSections}
+                  className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition-colors mt-2"
+                >
+                  Continue with {selectedSections.length || 'no'} section{selectedSections.length === 1 ? '' : 's'}
+                </button>
               </div>
             )}
           </div>
@@ -904,7 +1031,7 @@ export default function GradingInterface() {
             
             <h1 className="text-3xl font-bold text-gray-900 mb-2">Assignment Setup</h1>
             <p className="text-gray-600 mb-8">
-              {selectedTeacher?.name} - {selectedSection?.name}
+              {selectedTeacher?.name} - {selectedSections.length > 0 ? selectedSections.map(s => s.name).join(', ') : 'No section selected'}
             </p>
 
             <div className="mb-8">
@@ -1122,7 +1249,7 @@ export default function GradingInterface() {
           <div>
             <h1 className="text-2xl font-bold text-gray-900">{assignmentName}</h1>
             <p className="text-sm text-gray-500 mt-1">
-              {selectedTeacher?.name} - {selectedSection?.name}
+              {selectedTeacher?.name} - {selectedSections.length > 0 ? selectedSections.map(s => s.name).join(', ') : 'No section selected'}
             </p>
           </div>
           <div className="flex gap-3">
