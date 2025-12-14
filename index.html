@@ -2153,6 +2153,13 @@
 
           const currentGradingStudent = students.find(s => s.id === currentGradingStudentId);
 
+          // Only suggest a student if we're in PDF viewer mode and have a matching PDF
+          const hasAnyPDFs = uploadedPDFs.length > 0;
+          const pdfMatch = currentGradingStudent
+            ? uploadedPDFs.find((p) => String(p.studentId) === String(currentGradingStudent.studentId) && p.method !== 'Unmatched')
+            : null;
+          const studentSuggestion = (hasAnyPDFs && pdfMatch) ? currentGradingStudent.name : '';
+
           const payload = {
             audio: {
               filename,
@@ -2160,7 +2167,7 @@
               encoding: 'base64',
               data: base64
             },
-            student_suggestion: currentGradingStudent?.name || '',
+            student_suggestion: studentSuggestion,
             session: {
               id: sessionId || '',
               chunkNumber: chunkNum,
