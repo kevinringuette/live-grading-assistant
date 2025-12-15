@@ -786,6 +786,8 @@ export default function GradingInterface() {
         const numericStudentId = fields[CONFIG.FIELDS.STUDENTS.ID]
           || fields['Student ID']
           || fields['StudentID']
+          || fields['SID']
+          || fields.SID
           || null;
 
         const nameKey = fields[CONFIG.FIELDS.STUDENTS.NAME]
@@ -800,7 +802,26 @@ export default function GradingInterface() {
           || null;
 
         const scores: Record<string, number> = {};
+
+        // Primary method: Read from Grades table structure where each record
+        // has a 'Grade' field for the score and 'Rubric Item Name' for the item
+        // Also handle the 'Rurbic' linked record field (note: typo in Airtable schema)
+        const rubricItemName = fields['Rubric Item Name']
+          || fields['RubricItemName']
+          || fields.rubricItemName
+          || fields['Rubric Name (from Rurbic)']
+          || fields['Rubric Name']
+          || (Array.isArray(fields['Rurbic']) ? null : fields['Rurbic']); // Skip linked record IDs
+        const gradeValue = fields['Grade'] ?? fields.grade;
+
+        if (rubricItemName && gradeValue !== undefined && gradeValue !== null && gradeValue !== '') {
+          scores[rubricItemName] = Number(gradeValue) || 0;
+        }
+
+        // Fallback: Also try to match rubric items by looking for fields named after them
+        // (in case some assignments use a different data structure)
         rubricItems.forEach(item => {
+          if (scores[item.name] !== undefined) return; // Already have this score
           const rawScore = fields[item.name];
           if (rawScore !== undefined && rawScore !== null && rawScore !== '') {
             scores[item.name] = Number(rawScore) || 0;
