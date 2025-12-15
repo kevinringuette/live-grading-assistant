@@ -248,15 +248,6 @@
       }
     };
 
-    const chunkArray = (arr = [], size = 1) => {
-      if (!Array.isArray(arr) || size <= 0) return [];
-      const chunks = [];
-      for (let i = 0; i < arr.length; i += size) {
-        chunks.push(arr.slice(i, i + size));
-      }
-      return chunks;
-    };
-
     const normalizeWebhookResult = (result, logPrefix) => {
       let studentsData = [];
 
@@ -759,6 +750,15 @@
       const [uploadComplete, setUploadComplete] = useState(false);
       const [isSubmittingFinal, setIsSubmittingFinal] = useState(false);
 
+      const chunkArray = useCallback((arr = [], size = 1) => {
+        if (!Array.isArray(arr) || size <= 0) return [];
+        const chunks = [];
+        for (let i = 0; i < arr.length; i += size) {
+          chunks.push(arr.slice(i, i + size));
+        }
+        return chunks;
+      }, []);
+
       const [sortField, setSortField] = useState('name');
       const [sortDirection, setSortDirection] = useState('asc');
 
@@ -1221,6 +1221,15 @@
           if (!studentId) return;
 
           const scores = {};
+          const rubricItemName = fields['Rubric Item Name'] || fields.rubricItemName || fields.label || '';
+          const numericGrade = fields['Grade'] ?? fields.grade ?? fields.score;
+
+          // Primary schema: one record per rubric item with "Rubric Item Name" and "Grade" fields
+          if (rubricItemName && numericGrade !== undefined && numericGrade !== null && numericGrade !== '') {
+            scores[rubricItemName] = Number(numericGrade) || 0;
+          }
+
+          // Fallback: scores stored directly on fields keyed by rubric name
           rubricNames.forEach(name => {
             const rawScore = fields[name];
             if (rawScore !== undefined && rawScore !== null && rawScore !== '') {
