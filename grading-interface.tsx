@@ -640,7 +640,7 @@ export default function GradingInterface() {
     }
   };
 
-  const fetchGradesByIds = async (gradeIds: string[] = []) => {
+  const fetchGradesByIds = async (gradeIds: string[] = [], tableNames: string[] = []) => {
     if (!gradeIds || gradeIds.length === 0) return [];
 
     const chunks: string[][] = [];
@@ -649,17 +649,28 @@ export default function GradingInterface() {
     }
 
     const results: any[] = [];
+    const tablesToTry = Array.from(
+      new Set([
+        CONFIG.TABLES.GRADES,
+        'Grades 2',
+        ...(Array.isArray(tableNames) ? tableNames : [])
+      ].filter(Boolean))
+    );
+
     for (const chunk of chunks) {
       const formula = `OR(${chunk.map(id => `RECORD_ID()='${id}'`).join(',')})`;
-      try {
-        const response = await airtableRequest(
-          `${CONFIG.TABLES.GRADES}?filterByFormula=${encodeURIComponent(formula)}`
-        );
-        if (Array.isArray(response.records)) {
-          results.push(...response.records);
+      for (const tableName of tablesToTry) {
+        try {
+          const response = await airtableRequest(
+            `${tableName}?filterByFormula=${encodeURIComponent(formula)}`
+          );
+          if (Array.isArray(response.records) && response.records.length > 0) {
+            results.push(...response.records);
+            break; // stop trying other tables for this chunk once we get results
+          }
+        } catch (err) {
+          console.error('Error fetching grade records', { chunk, tableName }, err);
         }
-      } catch (err) {
-        console.error('Error fetching grade records by id chunk', chunk, err);
       }
     }
 
@@ -706,7 +717,11 @@ export default function GradingInterface() {
           : [];
 
       if ((!gradeRecords || gradeRecords.length === 0) && gradeRecordIds.length > 0) {
-        gradeRecords = await fetchGradesByIds(gradeRecordIds);
+        const explicitTable = typeof entry.gradeTable === 'string' ? entry.gradeTable : null;
+        const tableHints = [] as string[];
+        if (explicitTable) tableHints.push(explicitTable);
+        if (entry.gradeTableName) tableHints.push(entry.gradeTableName);
+        gradeRecords = await fetchGradesByIds(gradeRecordIds, tableHints);
       }
 
       const gradeMap: Record<string, any> = {};
