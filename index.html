@@ -248,6 +248,15 @@
       }
     };
 
+    const chunkArray = (arr = [], size = 1) => {
+      if (!Array.isArray(arr) || size <= 0) return [];
+      const chunks = [];
+      for (let i = 0; i < arr.length; i += size) {
+        chunks.push(arr.slice(i, i + size));
+      }
+      return chunks;
+    };
+
     const normalizeWebhookResult = (result, logPrefix) => {
       let studentsData = [];
 
