@@ -746,6 +746,33 @@ export default function GradingInterface() {
       }
 
       const gradeMap: Record<string, any> = {};
+
+      const mergeGradeEntries = (existingEntry: any, incomingEntry: any) => {
+        if (!existingEntry) return incomingEntry;
+
+        const mergedScores = { ...existingEntry.scores };
+        Object.entries(incomingEntry.scores || {}).forEach(([key, value]) => {
+          if (value !== undefined && value !== null) {
+            mergedScores[key] = value as number;
+          }
+        });
+
+        const existingComment = (existingEntry.comments || '').toString().trim();
+        const incomingComment = (incomingEntry.comments || '').toString().trim();
+        const combinedComments = existingComment
+          ? incomingComment && incomingComment !== existingComment
+            ? `${existingComment}\n${incomingComment}`
+            : existingComment
+          : incomingComment;
+
+        return {
+          scores: mergedScores,
+          comments: combinedComments,
+          completed: Object.keys(mergedScores).length > 0 || Boolean(combinedComments),
+          recordId: existingEntry.recordId || incomingEntry.recordId
+        };
+      };
+
       gradeRecords.forEach(grade => {
         const fields = grade.fields || grade;
         const studentField = fields[CONFIG.FIELDS.GRADES.STUDENT];
@@ -790,9 +817,13 @@ export default function GradingInterface() {
           if (key === undefined || key === null) return;
           const normalizedKey = typeof key === 'string' ? key.trim() : String(key);
           if (!normalizedKey) return;
-          gradeMap[normalizedKey] = gradeEntry;
-          if (typeof normalizedKey === 'string' && normalizedKey.toLowerCase() !== normalizedKey) {
-            gradeMap[normalizedKey.toLowerCase()] = gradeEntry;
+          const existing = gradeMap[normalizedKey];
+          const merged = mergeGradeEntries(existing, gradeEntry);
+          gradeMap[normalizedKey] = merged;
+          if (typeof normalizedKey === 'string') {
+            const lowerKey = normalizedKey.toLowerCase();
+            const existingLower = gradeMap[lowerKey];
+            gradeMap[lowerKey] = mergeGradeEntries(existingLower, gradeEntry);
           }
         };
 
