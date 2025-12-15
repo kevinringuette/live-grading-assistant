@@ -708,6 +708,7 @@
         { name: 'Completeness', maxPoints: 25 }
       ]);
       const [rubricItemIds, setRubricItemIds] = useState({}); // Maps rubric name to Airtable record ID
+      const [continuingAssignment, setContinuingAssignment] = useState(false);
       const [grades, setGrades] = useState({});
       const [currentStudent, setCurrentStudent] = useState(null);
 
@@ -1196,67 +1197,79 @@
             rubricItems: rubricItems
           };
 
-          // 1. Create Assignment
-          console.log('Creating assignment in n8n...');
-          const result = await n8nRequest(CONFIG.N8N_ASSIGNMENT_WEBHOOK_URL, payload);
-          console.log('n8n assignment response:', result);
+          const isContinuing = continuingAssignment || Boolean(assignmentRecordId) || Boolean(selectedVoiceAssignmentId);
+          let resolvedAssignmentId = assignmentRecordId;
 
-          let newAssignmentId = null;
+          if (!isContinuing) {
+            // 1. Create Assignment
+            console.log('Creating assignment in n8n...');
+            const result = await n8nRequest(CONFIG.N8N_ASSIGNMENT_WEBHOOK_URL, payload);
+            console.log('n8n assignment response:', result);
 
-          // Handle array response from n8n (as per user spec)
-          if (Array.isArray(result) && result.length > 0 && result[0].id) {
-            newAssignmentId = result[0].id;
-          } else if (result && result.id) {
-            // Fallback for object format
-            newAssignmentId = result.id;
-          }
-
-          if (newAssignmentId) {
-            console.log(`Assignment created with ID: ${newAssignmentId}`);
-            setAssignmentRecordId(newAssignmentId);
-
-            // 2. Send Rubric Items linked to this Assignment
-            // User requested to use "Create rubric n8n post" with the assignment ID
-            if (CONFIG.N8N_RUBRIC_ITEMS_WEBHOOK_URL) {
-              console.log('Sending rubric items to n8n...');
-              const rubricResponse = await n8nRequest(CONFIG.N8N_RUBRIC_ITEMS_WEBHOOK_URL, {
-                assignmentId: newAssignmentId,
-                rubricItems: rubricItems
-              });
-              console.log('Rubric items sent successfully.');
-
-              // Capture rubric item IDs from response
-              // Response format can be: { data: [...] } OR [{ data: [...] }]
-              let rubricData = null;
-              if (rubricResponse && rubricResponse.data && Array.isArray(rubricResponse.data)) {
-                // Direct object format: { data: [...] }
-                rubricData = rubricResponse.data;
-              } else if (rubricResponse && Array.isArray(rubricResponse) && rubricResponse[0]?.data) {
-                // Array wrapper format: [{ data: [...] }]
-                rubricData = rubricResponse[0].data;
-              }
-
-              if (rubricData) {
-                const idMapping = {};
-                rubricData.forEach(item => {
-                  const rubricName = item.fields?.['Rubric Name'];
-                  if (rubricName && item.id) {
-                    idMapping[rubricName] = item.id;
-                  }
-                });
-                console.log('Rubric ID mapping:', idMapping);
-                setRubricItemIds(idMapping);
-              } else {
-                console.warn('Unexpected rubric response format:', rubricResponse);
-              }
-            } else {
-              console.warn('N8N_RUBRIC_ITEMS_WEBHOOK_URL not configured. Skipping rubric sync.');
+            // Handle array response from n8n (as per user spec)
+            if (Array.isArray(result) && result.length > 0 && result[0].id) {
+              resolvedAssignmentId = result[0].id;
+            } else if (result && result.id) {
+              // Fallback for object format
+              resolvedAssignmentId = result.id;
             }
 
+            if (resolvedAssignmentId) {
+              console.log(`Assignment created with ID: ${resolvedAssignmentId}`);
+              setAssignmentRecordId(resolvedAssignmentId);
+
+              // 2. Send Rubric Items linked to this Assignment
+              // User requested to use "Create rubric n8n post" with the assignment ID
+              if (CONFIG.N8N_RUBRIC_ITEMS_WEBHOOK_URL) {
+                console.log('Sending rubric items to n8n...');
+                const rubricResponse = await n8nRequest(CONFIG.N8N_RUBRIC_ITEMS_WEBHOOK_URL, {
+                  assignmentId: resolvedAssignmentId,
+                  rubricItems: rubricItems
+                });
+                console.log('Rubric items sent successfully.');
+
+                // Capture rubric item IDs from response
+                // Response format can be: { data: [...] } OR [{ data: [...] }]
+                let rubricData = null;
+                if (rubricResponse && rubricResponse.data && Array.isArray(rubricResponse.data)) {
+                  // Direct object format: { data: [...] }
+                  rubricData = rubricResponse.data;
+                } else if (rubricResponse && Array.isArray(rubricResponse) && rubricResponse[0]?.data) {
+                  // Array wrapper format: [{ data: [...] }]
+                  rubricData = rubricResponse[0].data;
+                }
+
+                if (rubricData) {
+                  const idMapping = {};
+                  rubricData.forEach(item => {
+                    const rubricName = item.fields?.['Rubric Name'];
+                    if (rubricName && item.id) {
+                      idMapping[rubricName] = item.id;
+                    }
+                  });
+                  console.log('Rubric ID mapping:', idMapping);
+                  setRubricItemIds(idMapping);
+                } else {
+                  console.warn('Unexpected rubric response format:', rubricResponse);
+                }
+              } else {
+                console.warn('N8N_RUBRIC_ITEMS_WEBHOOK_URL not configured. Skipping rubric sync.');
+              }
+
+            } else {
+              console.warn('No assignment ID returned from n8n. Response was:', result);
+              // We can continue locally, but n8n sync might be incomplete
+              alert('Warning: n8n did not return an assignment ID. Grading will proceed locally but may not sync correctly.');
+            }
           } else {
-            console.warn('No assignment ID returned from n8n. Response was:', result);
-            // We can continue locally, but n8n sync might be incomplete
-            alert('Warning: n8n did not return an assignment ID. Grading will proceed locally but may not sync correctly.');
+            resolvedAssignmentId = resolvedAssignmentId || selectedVoiceAssignmentId || null;
+            if (!resolvedAssignmentId) {
+              console.warn('Continuing assignment requested but no assignment ID available.');
+            }
+            if (resolvedAssignmentId && !assignmentRecordId) {
+              setAssignmentRecordId(resolvedAssignmentId);
+            }
+            console.log('Continuing existing assignment; skipping rubric creation.');
           }
 
           setSessionId(Date.now().toString());
@@ -1264,6 +1277,7 @@
           if (firstStudent) {
             setCurrentGradingStudentId(firstStudent.id);
           }
+          setContinuingAssignment(false);
           setStep('grading');
         } catch (err) {
           console.error('Error starting grading session:', err);
@@ -1328,11 +1342,19 @@
       const loadVoiceGraderAssignments = async () => {
         try {
           const response = await airtableRequest(CONFIG.TABLES.VOICE_GRADER);
-          const assignments = (response.records || []).map(record => ({
-            id: record.id,
-            name: record.fields[CONFIG.FIELDS.VOICE_GRADER.ASSIGNMENT_NAME],
-            items: normalizeRubricItems(record.fields[CONFIG.FIELDS.VOICE_GRADER.RUBRIC])
-          })).filter(record => !!record.name)
+          const assignments = (response.records || []).map(record => {
+            const rubricRecordIdsRaw = record.fields['Rubrics'] || record.fields['Rubric Record Ids'] || [];
+            const rubricRecordIds = Array.isArray(rubricRecordIdsRaw)
+              ? rubricRecordIdsRaw.filter(Boolean)
+              : [];
+
+            return {
+              id: record.id,
+              name: record.fields[CONFIG.FIELDS.VOICE_GRADER.ASSIGNMENT_NAME],
+              items: normalizeRubricItems(record.fields[CONFIG.FIELDS.VOICE_GRADER.RUBRIC]),
+              rubricRecordIds
+            };
+          }).filter(record => !!record.name)
             .sort((a, b) => a.name.localeCompare(b.name));
           setVoiceGraderAssignments(assignments);
         } catch (err) {
@@ -1342,13 +1364,31 @@
 
       const handleVoiceAssignmentSelection = (assignmentId) => {
         setSelectedVoiceAssignmentId(assignmentId);
-        if (!assignmentId) return;
+        if (!assignmentId) {
+          setContinuingAssignment(false);
+          setAssignmentRecordId(null);
+          setRubricItemIds({});
+          return;
+        }
 
         const selected = voiceGraderAssignments.find(a => a.id === assignmentId);
         if (selected) {
           setAssignmentName(selected.name || '');
           const safeItems = Array.isArray(selected.items) ? selected.items : normalizeRubricItems(selected.items);
           setRubricItems(safeItems);
+          setAssignmentRecordId(selected.id);
+          setContinuingAssignment(true);
+
+          if (Array.isArray(selected.rubricRecordIds) && selected.rubricRecordIds.length === safeItems.length) {
+            const nextMap = {};
+            selected.rubricRecordIds.forEach((rid, idx) => {
+              const rubricName = safeItems[idx]?.name;
+              if (rubricName && rid) {
+                nextMap[rubricName] = rid;
+              }
+            });
+            setRubricItemIds(nextMap);
+          }
         }
       };
 
