@@ -11,6 +11,7 @@ const CONFIG = {
   
   // Your n8n Webhook URL
   N8N_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook-test/voice-grader', // e.g., 'https://your-n8n.com/webhook/grading'
+  EXISTING_ASSIGNMENTS_WEBHOOK_URL: 'https://kringuette0.app.n8n.cloud/webhook/431b2dd5-dee4-4390-8f65-39f81b69129c',
   
   // Airtable Table Names (update if your table names are different)
   TABLES: {
@@ -59,8 +60,9 @@ const CONFIG = {
     Voice_Grader: {
       ASSIGNMENT_NAME: 'Assignment Name',
       TEACHER: 'Teacher',
-      RUBRIC: 'Rubric'
-    }    
+      RUBRIC: 'Rubric',
+      SECTIONS: 'Master Sections'
+    }
   }
 };
 
@@ -144,16 +146,26 @@ const getRubricSignature = (items: any) => {
 };
 
 const getUniqueRubricsByItems = (rubrics = []) => {
-  const seen = new Set();
+  const signatureToIndex = new Map();
   const unique = [];
 
   rubrics.forEach(rubric => {
     const normalizedItems = normalizeRubricItems(rubric.items);
     if (normalizedItems.length === 0) return; // skip empty/invalid rubrics
     const signature = getRubricSignature(normalizedItems);
-    if (!seen.has(signature)) {
-      seen.add(signature);
+
+    if (!signatureToIndex.has(signature)) {
+      signatureToIndex.set(signature, unique.length);
       unique.push({ ...rubric, items: normalizedItems });
+    } else {
+      const idx = signatureToIndex.get(signature);
+      const existing = unique[idx];
+      const existingSectionCount = existing.sectionIds?.length || 0;
+      const newSectionCount = rubric.sectionIds?.length || 0;
+      const shouldReplace = newSectionCount > existingSectionCount || (!existing.assignmentName && rubric.assignmentName);
+      if (shouldReplace) {
+        unique[idx] = { ...rubric, items: normalizedItems };
+      }
     }
   });
 
@@ -172,7 +184,7 @@ export default function GradingInterface() {
   const [teachers, setTeachers] = useState([]);
   const [selectedTeacher, setSelectedTeacher] = useState(null);
   const [sections, setSections] = useState([]);
-  const [selectedSection, setSelectedSection] = useState(null);
+  const [selectedSections, setSelectedSections] = useState([]);
   const [students, setStudents] = useState([]);
   
   // Assignment setup
@@ -190,6 +202,9 @@ export default function GradingInterface() {
   const [rubricFilterTeacher, setRubricFilterTeacher] = useState(null);
   const [rubricSearchQuery, setRubricSearchQuery] = useState('');
   const [selectedRubricOption, setSelectedRubricOption] = useState('');
+  const [assignmentOptions, setAssignmentOptions] = useState([]);
+  const [assignmentOptionsLoading, setAssignmentOptionsLoading] = useState(false);
+  const [assignmentOptionsError, setAssignmentOptionsError] = useState('');
   
   // Grading data
   const [grades, setGrades] = useState({});
@@ -202,6 +217,8 @@ export default function GradingInterface() {
   const [audioChunks, setAudioChunks] = useState([]);
   const [processingAudio, setProcessingAudio] = useState(false);
   const [sessionId, setSessionId] = useState(null);
+  const [activeAssignmentId, setActiveAssignmentId] = useState<string | null>(null);
+  const [gradeRecordIds, setGradeRecordIds] = useState<Record<string, string>>({});
   const teacherRubricOptions = useMemo(() => {
     // Only show rubrics that belong to the currently selected teacher; do not fall back to all teachers
     const source = selectedTeacher ? savedRubrics : allRubrics;
@@ -292,6 +309,8 @@ export default function GradingInterface() {
 
   const selectTeacher = async (teacher) => {
     setSelectedTeacher(teacher);
+    setSelectedSections([]);
+    setActiveAssignmentId(null);
     setLoading(true);
     setStep('class-select');
     setError(null);
@@ -310,11 +329,7 @@ export default function GradingInterface() {
         sectionId: record.fields[CONFIG.FIELDS.SECTIONS.SECTION_ID]
       }));
       
-      setSections(sectionsList);      git remote add origin git@github.com:kevinringuette/live-grading-assistant.git
-      # OR
-      # git remote add origin https://github.com/kevinringuette/live-grading-assistant.git      git remote add origin git@github.com:kevinringuette/live-grading-assistant.git
-      # OR
-      # git remote add origin https://github.com/kevinringuette/live-grading-assistant.git
+      setSections(sectionsList);
     } catch (err) {
       console.error('Error loading sections:', err);
       setError('Failed to load sections. Check console for details.');
@@ -327,9 +342,11 @@ export default function GradingInterface() {
   useEffect(() => {
     if (selectedTeacher) {
       loadSavedRubrics().catch(err => console.error('Error loading rubrics:', err));
+      fetchExistingAssignments().catch(err => console.error('Error loading assignments:', err));
     } else {
       setSavedRubrics([]);
       setAllRubrics([]);
+      setAssignmentOptions([]);
     }
   }, [selectedTeacher]);
 
@@ -337,56 +354,86 @@ export default function GradingInterface() {
     setSelectedRubricOption('');
   }, [selectedTeacher]);
 
-  const selectSection = async (section) => {
-    setSelectedSection(section);
+  const loadStudentsForSections = async (sectionsToLoad, existingGrades = null) => {
     setLoading(true);
-    setStep('setup');
     setError(null);
-    
+
     try {
-      // Get section details to retrieve student IDs
-      const sectionData = await airtableRequest(`${CONFIG.TABLES.SECTIONS}/${section.id}`);
-      const studentIds = sectionData.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER] || [];
-      
-      if (studentIds.length === 0) {
-        setError('No students found in this section');
+      // Fetch section details and collect unique student IDs
+      const sectionDetails = await Promise.all(
+        sectionsToLoad.map(section => airtableRequest(`${CONFIG.TABLES.SECTIONS}/${section.id}`))
+      );
+
+      const uniqueStudentIds = new Set<string>();
+      sectionDetails.forEach(detail => {
+        const studentIds = detail.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER] || [];
+        studentIds.forEach(id => uniqueStudentIds.add(id));
+      });
+
+      if (uniqueStudentIds.size === 0) {
+        setError('No students found in the selected section(s)');
         setStudents([]);
         setLoading(false);
         return;
       }
-      
-      // Fetch all students
-      const studentsPromises = studentIds.map(studentId =>
-        airtableRequest(`${CONFIG.TABLES.STUDENTS}/${studentId}`)
+
+      const studentsData = await Promise.all(
+        Array.from(uniqueStudentIds).map(studentId =>
+          airtableRequest(`${CONFIG.TABLES.STUDENTS}/${studentId}`)
+        )
       );
-      
-      const studentsData = await Promise.all(studentsPromises);
+
       const studentsList = studentsData.map(data => ({
         id: data.id,
         name: data.fields[CONFIG.FIELDS.STUDENTS.NAME],
         email: data.fields[CONFIG.FIELDS.STUDENTS.EMAIL],
         studentId: data.fields[CONFIG.FIELDS.STUDENTS.ID]?.toString() || 'N/A'
       }));
-      
+
       setStudents(studentsList);
-      
-      // Initialize empty grades
-      const initialGrades = {};
+
+      const initialGrades = {} as Record<string, any>;
+      const nextGradeRecordIds: Record<string, string> = {};
+
       studentsList.forEach(student => {
+        const existing = existingGrades ? existingGrades[student.id] : null;
         initialGrades[student.id] = {
-          scores: {},
-          comments: '',
-          completed: false
+          scores: existing?.scores || {},
+          comments: existing?.comments || '',
+          completed: existing?.completed || false
         };
+        if (existing?.recordId) {
+          nextGradeRecordIds[student.id] = existing.recordId;
+        }
       });
+
+      setGradeRecordIds(nextGradeRecordIds);
       setGrades(initialGrades);
-      
     } catch (err) {
       console.error('Error loading students:', err);
       setError('Failed to load students. Check console for details.');
     } finally {
       setLoading(false);
     }
+  };
+
+  const toggleSectionSelection = (section) => {
+    setActiveAssignmentId(null);
+    setSelectedSections(prev => {
+      const exists = prev.find(s => s.id === section.id);
+      if (exists) return prev.filter(s => s.id !== section.id);
+      return [...prev, section];
+    });
+  };
+
+  const proceedWithSections = async () => {
+    if (selectedSections.length === 0) {
+      alert('Please choose at least one section');
+      return;
+    }
+
+    setStep('setup');
+    await loadStudentsForSections(selectedSections);
   };
 
   // ============================================================================
@@ -428,7 +475,7 @@ export default function GradingInterface() {
         formData.append('audio', audioBlob);
         formData.append('sessionId', sessionId);
         formData.append('teacherId', selectedTeacher.id);
-        formData.append('sectionId', selectedSection.id);
+        formData.append('sectionIds', JSON.stringify(selectedSections.map(s => s.id)));
         formData.append('assignmentName', assignmentName);
         formData.append('rubricItems', JSON.stringify(rubricItems));
         formData.append('students', JSON.stringify(students));
@@ -529,10 +576,10 @@ export default function GradingInterface() {
   
   const saveToAirtable = async () => {
     setLoading(true);
-    
+
     try {
       // Create records in Grades table for each student
-      const gradeRecords = Object.entries(grades)
+      const gradeEntries = Object.entries(grades)
         .filter(([_, data]) => data.completed)
         .map(([studentId, data]) => {
           const fields = {
@@ -540,28 +587,208 @@ export default function GradingInterface() {
             [CONFIG.FIELDS.GRADES.COMMENTS]: data.comments,
             [CONFIG.FIELDS.GRADES.FINAL_GRADE]: calculateTotal(data)
           };
-          
+
           // Add individual rubric scores as fields
           rubricItems.forEach(item => {
             fields[item.name] = data.scores[item.name] || 0;
           });
-          
-          return { fields };
+
+          const recordId = gradeRecordIds[studentId];
+          return recordId ? { id: recordId, fields } : { fields };
         });
-      
-      // Batch create records
-      const response = await airtableRequest(CONFIG.TABLES.GRADES, {
-        method: 'POST',
-        body: JSON.stringify({ records: gradeRecords })
-      });
-      
-      alert(`Successfully saved ${response.records.length} grades to Airtable!`);
-      
+
+      const recordsToUpdate = gradeEntries.filter(entry => (entry as any).id);
+      const recordsToCreate = gradeEntries.filter(entry => !(entry as any).id);
+      const updatedIds: Record<string, string> = { ...gradeRecordIds };
+
+      if (recordsToUpdate.length > 0) {
+        const response = await airtableRequest(CONFIG.TABLES.GRADES, {
+          method: 'PATCH',
+          body: JSON.stringify({ records: recordsToUpdate })
+        });
+
+        response.records.forEach(record => {
+          const student = record.fields?.[CONFIG.FIELDS.GRADES.STUDENT]?.[0];
+          if (student) {
+            updatedIds[student] = record.id;
+          }
+        });
+      }
+
+      if (recordsToCreate.length > 0) {
+        const response = await airtableRequest(CONFIG.TABLES.GRADES, {
+          method: 'POST',
+          body: JSON.stringify({ records: recordsToCreate })
+        });
+
+        response.records.forEach(record => {
+          const student = record.fields?.[CONFIG.FIELDS.GRADES.STUDENT]?.[0];
+          if (student) {
+            updatedIds[student] = record.id;
+          }
+        });
+      }
+
+      setGradeRecordIds(updatedIds);
+      alert(`Successfully saved ${gradeEntries.length} grades to Airtable!`);
+
     } catch (err) {
       console.error('Error saving to Airtable:', err);
       alert('Error saving to Airtable. Check console for details.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchGradesByIds = async (gradeIds: string[] = [], tableNames: string[] = []) => {
+    if (!gradeIds || gradeIds.length === 0) return [];
+
+    const chunks: string[][] = [];
+    for (let i = 0; i < gradeIds.length; i += 10) {
+      chunks.push(gradeIds.slice(i, i + 10));
+    }
+
+    const results: any[] = [];
+    const tablesToTry = Array.from(
+      new Set([
+        CONFIG.TABLES.GRADES,
+        'Grades 2',
+        ...(Array.isArray(tableNames) ? tableNames : [])
+      ].filter(Boolean))
+    );
+
+    for (const chunk of chunks) {
+      const formula = `OR(${chunk.map(id => `RECORD_ID()='${id}'`).join(',')})`;
+      for (const tableName of tablesToTry) {
+        try {
+          const response = await airtableRequest(
+            `${tableName}?filterByFormula=${encodeURIComponent(formula)}`
+          );
+          if (Array.isArray(response.records) && response.records.length > 0) {
+            results.push(...response.records);
+            break; // stop trying other tables for this chunk once we get results
+          }
+        } catch (err) {
+          console.error('Error fetching grade records', { chunk, tableName }, err);
+        }
+      }
+    }
+
+    return results;
+  };
+
+  const normalizeWebhookAssignments = async (payload) => {
+    const listCandidates = Array.isArray(payload?.assignments)
+      ? payload.assignments
+      : Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.data)
+          ? payload.data
+          : [];
+
+    return Promise.all((listCandidates || []).map(async (entry, idx) => {
+      const rubricItems = normalizeRubricItems(
+        entry.rubricItems
+        ?? entry.rubric
+        ?? entry.items
+        ?? entry.rubrics
+        ?? entry.Rubric
+      );
+      const sectionIds = (
+        entry.sectionIds
+        || entry.sections
+        || entry.Section
+        || entry.section
+        || []
+      ).filter(Boolean);
+
+      const gradeRecordIds = Array.isArray(entry['Grades 2'])
+        ? entry['Grades 2']
+        : Array.isArray(entry.grades2)
+          ? entry.grades2
+          : Array.isArray(entry.Grades)
+            ? entry.Grades
+            : [];
+
+      let gradeRecords = Array.isArray(entry.grades)
+        ? entry.grades
+        : Array.isArray(entry.gradeRecords)
+          ? entry.gradeRecords
+          : [];
+
+      if ((!gradeRecords || gradeRecords.length === 0) && gradeRecordIds.length > 0) {
+        const explicitTable = typeof entry.gradeTable === 'string' ? entry.gradeTable : null;
+        const tableHints = [] as string[];
+        if (explicitTable) tableHints.push(explicitTable);
+        if (entry.gradeTableName) tableHints.push(entry.gradeTableName);
+        gradeRecords = await fetchGradesByIds(gradeRecordIds, tableHints);
+      }
+
+      const gradeMap: Record<string, any> = {};
+      gradeRecords.forEach(grade => {
+        const fields = grade.fields || grade;
+        const studentField = fields[CONFIG.FIELDS.GRADES.STUDENT];
+        const studentId = grade.studentId
+          || grade.student
+          || grade.studentRecordId
+          || (Array.isArray(studentField) ? studentField[0] : null);
+        if (!studentId) return;
+
+        const scores: Record<string, number> = {};
+        rubricItems.forEach(item => {
+          const rawScore = fields[item.name];
+          if (rawScore !== undefined && rawScore !== null && rawScore !== '') {
+            scores[item.name] = Number(rawScore) || 0;
+          }
+        });
+
+        const comments = fields[CONFIG.FIELDS.GRADES.COMMENTS] || fields.comments || '';
+        gradeMap[studentId] = {
+          scores,
+          comments,
+          completed: Object.keys(scores).length > 0 || Boolean(comments),
+          recordId: grade.id || grade.recordId
+        };
+      });
+
+      return {
+        id: entry.id || entry.assignmentId || entry.voiceGraderId || entry.rubricRecordId || `assignment-${idx}`,
+        name: entry.assignmentName || entry.name || `Assignment ${idx + 1}`,
+        assignmentName: entry.assignmentName || entry.name || '',
+        rubricItems,
+        sectionIds,
+        gradeMap,
+        voiceGraderId: entry.voiceGraderId || entry.assignmentId || entry.rubricRecordId || null
+      };
+    });
+  };
+
+  const fetchExistingAssignments = async () => {
+    if (!selectedTeacher || !CONFIG.EXISTING_ASSIGNMENTS_WEBHOOK_URL) return;
+
+    setAssignmentOptionsLoading(true);
+    setAssignmentOptionsError('');
+
+    try {
+      const response = await fetch(CONFIG.EXISTING_ASSIGNMENTS_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ teacherId: selectedTeacher.id })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Webhook request failed: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      const normalized = await normalizeWebhookAssignments(data);
+      setAssignmentOptions(normalized);
+    } catch (err) {
+      console.error('Error loading existing assignments:', err);
+      setAssignmentOptionsError('Failed to load past assignments.');
+      setAssignmentOptions([]);
+    } finally {
+      setAssignmentOptionsLoading(false);
     }
   };
 
@@ -592,12 +819,28 @@ export default function GradingInterface() {
           const teacherEmails = record.fields['Teacher Email'] || [];
           const teacherNamesExtra = Array.isArray(teacherEmails) ? teacherEmails.map(e => String(e)) : [];
 
+          const sectionFieldCandidates = [
+            vgFields.SECTIONS,
+            CONFIG.FIELDS.TEACHERS.SECTIONS,
+            'Sections',
+            'Master Sections',
+            'Class Sections'
+          ].filter(Boolean);
+          const sectionIds = sectionFieldCandidates.reduce((acc, fieldName) => {
+            if (acc.length > 0) return acc;
+            const val = record.fields[fieldName];
+            if (Array.isArray(val)) return val;
+            return acc;
+          }, [] as string[]);
+
           return {
             id: record.id,
             name: record.fields[vgFields.ASSIGNMENT_NAME] || record.fields[CONFIG.FIELDS.RUBRICS.NAME] || 'Unnamed',
+            assignmentName: record.fields[vgFields.ASSIGNMENT_NAME] || '',
             items,
             teacherIds,
-            teacherNames: [...teacherNamesFromField, ...teacherNamesExtra]
+            teacherNames: [...teacherNamesFromField, ...teacherNamesExtra],
+            sectionIds
           };
         })
         .filter(Boolean);
@@ -646,6 +889,7 @@ export default function GradingInterface() {
   const loadRubric = (rubric) => {
     const safeItems = Array.isArray(rubric.items) ? rubric.items : normalizeRubricItems(rubric.items);
     setRubricItems(safeItems);
+    maybeReuseAssignmentRecord(rubric);
     if (rubric?.id && teacherRubricOptions.some(r => r.id === rubric.id)) {
       setSelectedRubricOption(rubric.id);
     }
@@ -658,6 +902,79 @@ export default function GradingInterface() {
     const selected = teacherRubricOptions.find(r => r.id === rubricId);
     if (selected) {
       loadRubric(selected);
+    }
+  };
+
+  const applyExistingAssignment = async (assignment) => {
+    if (!assignment) return;
+
+    const assignmentLabel = assignment.assignmentName || assignment.name || '';
+    setAssignmentName(assignmentLabel);
+    if (assignment.rubricItems?.length) {
+      setRubricItems(assignment.rubricItems);
+    }
+
+    const matchingSections = sections.filter(section => (assignment.sectionIds || []).includes(section.id));
+    if (matchingSections.length > 0) {
+      setSelectedSections(matchingSections);
+      await loadStudentsForSections(matchingSections, assignment.gradeMap || null);
+    } else {
+      setGradeRecordIds({});
+    }
+
+    if (assignment.voiceGraderId || assignment.id) {
+      setActiveAssignmentId(assignment.voiceGraderId || assignment.id);
+    }
+  };
+
+  const normalizeAssignment = (name: string) => (name || '').trim().toLowerCase();
+
+  const sectionsMatch = (a: string[], b: string[]) => {
+    if (a.length !== b.length) return false;
+    const setA = new Set(a);
+    return b.every(id => setA.has(id));
+  };
+
+  const maybeReuseAssignmentRecord = (rubric) => {
+    const currentSections = selectedSections.map(s => s.id);
+    const recordSections = Array.isArray(rubric.sectionIds) ? rubric.sectionIds : [];
+    const teacherMatches = (rubric.teacherIds || []).includes(selectedTeacher?.id);
+    const assignmentMatches = normalizeAssignment(assignmentName) === normalizeAssignment(rubric.assignmentName || rubric.name);
+
+    if (teacherMatches && assignmentMatches && currentSections.length > 0 && sectionsMatch(currentSections, recordSections)) {
+      setActiveAssignmentId(rubric.id);
+    } else {
+      setActiveAssignmentId(null);
+    }
+  };
+
+  const upsertVoiceGraderRecord = async () => {
+    if (!selectedTeacher) return;
+    const vgFields = CONFIG.FIELDS.Voice_Grader;
+    const sectionFieldName = vgFields.SECTIONS || CONFIG.FIELDS.TEACHERS.SECTIONS || 'Master Sections';
+    const fields: Record<string, any> = {
+      [vgFields.ASSIGNMENT_NAME]: assignmentName,
+      [vgFields.TEACHER]: [selectedTeacher.id],
+      [vgFields.RUBRIC]: JSON.stringify(rubricItems),
+      [sectionFieldName]: selectedSections.map(s => s.id)
+    };
+
+    try {
+      if (activeAssignmentId) {
+        const updated = await airtableRequest(`${CONFIG.TABLES.VOICE_GRADER}/${activeAssignmentId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ fields })
+        });
+        if (updated?.id) setActiveAssignmentId(updated.id);
+      } else {
+        const created = await airtableRequest(CONFIG.TABLES.VOICE_GRADER, {
+          method: 'POST',
+          body: JSON.stringify({ fields })
+        });
+        if (created?.id) setActiveAssignmentId(created.id);
+      }
+    } catch (err) {
+      console.error('Error syncing Voice Grader record:', err);
     }
   };
 
@@ -711,7 +1028,7 @@ export default function GradingInterface() {
     setRubricItems(updated);
   };
 
-  const startGrading = () => {
+  const startGrading = async () => {
     if (!assignmentName.trim()) {
       alert('Please enter an assignment name');
       return;
@@ -720,6 +1037,9 @@ export default function GradingInterface() {
       alert('Please fill in all rubric item names');
       return;
     }
+    setLoading(true);
+    await upsertVoiceGraderRecord();
+    setLoading(false);
     setStep('grading');
   };
 
@@ -865,21 +1185,37 @@ export default function GradingInterface() {
               </div>
             ) : (
               <div className="space-y-3">
-                {sections.map(section => (
-                  <button
-                    key={section.id}
-                    onClick={() => selectSection(section)}
-                    className="w-full text-left p-4 border border-gray-200 rounded-lg hover:border-blue-400 hover:bg-blue-50 transition-all"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="font-semibold text-gray-900">{section.name}</p>
-                        <p className="text-sm text-gray-500">{section.studentCount} students</p>
+                {sections.map(section => {
+                  const isSelected = selectedSections.some(s => s.id === section.id);
+                  return (
+                    <button
+                      key={section.id}
+                      onClick={() => toggleSectionSelection(section)}
+                      className={`w-full text-left p-4 border rounded-lg transition-all ${
+                        isSelected
+                          ? 'border-blue-500 bg-blue-50'
+                          : 'border-gray-200 hover:border-blue-400 hover:bg-blue-50'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="font-semibold text-gray-900">{section.name}</p>
+                          <p className="text-sm text-gray-500">{section.studentCount} students</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm text-gray-600">Select</span>
+                          <input type="checkbox" readOnly checked={isSelected} className="h-4 w-4" />
+                        </div>
                       </div>
-                      <ChevronRight className="w-5 h-5 text-blue-600" />
-                    </div>
-                  </button>
-                ))}
+                    </button>
+                  );
+                })}
+                <button
+                  onClick={proceedWithSections}
+                  className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition-colors mt-2"
+                >
+                  Continue with {selectedSections.length || 'no'} section{selectedSections.length === 1 ? '' : 's'}
+                </button>
               </div>
             )}
           </div>
@@ -904,8 +1240,55 @@ export default function GradingInterface() {
             
             <h1 className="text-3xl font-bold text-gray-900 mb-2">Assignment Setup</h1>
             <p className="text-gray-600 mb-8">
-              {selectedTeacher?.name} - {selectedSection?.name}
+              {selectedTeacher?.name} - {selectedSections.length > 0 ? selectedSections.map(s => s.name).join(', ') : 'No section selected'}
             </p>
+
+            <div className="mb-8">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-3">
+                <div>
+                  <p className="text-sm font-semibold text-gray-900">Continue a previous assignment</p>
+                  <p className="text-xs text-gray-600">Load rubric and existing grades from Airtable via the assignment webhook.</p>
+                </div>
+                <button
+                  onClick={fetchExistingAssignments}
+                  className="inline-flex items-center gap-1 text-sm text-blue-700 hover:text-blue-800"
+                >
+                  <Download className="w-4 h-4" /> Refresh list
+                </button>
+              </div>
+
+              <div className="p-4 border border-indigo-100 rounded-lg bg-indigo-50">
+                {assignmentOptionsLoading ? (
+                  <div className="flex items-center gap-2 text-indigo-800 text-sm">
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-indigo-600"></div>
+                    Loading assignments...
+                  </div>
+                ) : assignmentOptionsError ? (
+                  <p className="text-sm text-red-600">{assignmentOptionsError}</p>
+                ) : assignmentOptions.length === 0 ? (
+                  <p className="text-sm text-indigo-900">No existing assignments found for this teacher yet.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {assignmentOptions.map(option => (
+                      <div key={option.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-white border border-indigo-200 rounded-md p-3">
+                        <div>
+                          <p className="text-sm font-semibold text-gray-900">{option.name || 'Untitled assignment'}</p>
+                          <p className="text-xs text-gray-600">
+                            {option.rubricItems?.length || 0} rubric item{(option.rubricItems?.length || 0) === 1 ? '' : 's'} • {option.sectionIds?.length || 0} section{(option.sectionIds?.length || 0) === 1 ? '' : 's'}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => applyExistingAssignment(option)}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                        >
+                          <Upload className="w-4 h-4" /> Load assignment
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
 
             <div className="mb-8">
               <label className="block text-sm font-semibold text-gray-900 mb-2">
@@ -914,7 +1297,11 @@ export default function GradingInterface() {
               <input
                 type="text"
                 value={assignmentName}
-                onChange={(e) => setAssignmentName(e.target.value)}
+                onChange={(e) => {
+                  const nextValue = e.target.value;
+                  setAssignmentName(nextValue);
+                  if (activeAssignmentId) setActiveAssignmentId(null);
+                }}
                 placeholder="e.g., Unit 3 Test, Chapter 5 Quiz, Essay Assignment"
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
@@ -1122,7 +1509,7 @@ export default function GradingInterface() {
           <div>
             <h1 className="text-2xl font-bold text-gray-900">{assignmentName}</h1>
             <p className="text-sm text-gray-500 mt-1">
-              {selectedTeacher?.name} - {selectedSection?.name}
+              {selectedTeacher?.name} - {selectedSections.length > 0 ? selectedSections.map(s => s.name).join(', ') : 'No section selected'}
             </p>
           </div>
           <div className="flex gap-3">

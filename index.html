@@ -708,6 +708,7 @@
         { name: 'Completeness', maxPoints: 25 }
       ]);
       const [rubricItemIds, setRubricItemIds] = useState({}); // Maps rubric name to Airtable record ID
+      const [continuingAssignment, setContinuingAssignment] = useState(false);
       const [grades, setGrades] = useState({});
       const [currentStudent, setCurrentStudent] = useState(null);
 
@@ -748,6 +749,15 @@
       const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
       const [uploadComplete, setUploadComplete] = useState(false);
       const [isSubmittingFinal, setIsSubmittingFinal] = useState(false);
+
+      const chunkArray = useCallback((arr = [], size = 1) => {
+        if (!Array.isArray(arr) || size <= 0) return [];
+        const chunks = [];
+        for (let i = 0; i < arr.length; i += size) {
+          chunks.push(arr.slice(i, i + size));
+        }
+        return chunks;
+      }, []);
 
       const [sortField, setSortField] = useState('name');
       const [sortDirection, setSortDirection] = useState('asc');
@@ -1175,6 +1185,124 @@
         }
       };
 
+      const fetchGradesByIds = async (ids = []) => {
+        if (!ids || ids.length === 0) return [];
+
+        const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
+        const chunks = chunkArray(uniqueIds, 10);
+        const results = [];
+
+        for (const chunk of chunks) {
+          const formula = `OR(${chunk.map(id => `RECORD_ID()='${id}'`).join(',')})`;
+          for (const tableName of ['Grades', 'Grades 2']) {
+            try {
+              const response = await airtableRequest(`${tableName}?filterByFormula=${encodeURIComponent(formula)}`);
+              if (Array.isArray(response.records) && response.records.length > 0) {
+                results.push(...response.records);
+                break; // stop trying other tables for this chunk once we get results
+              }
+            } catch (err) {
+              console.error('Error fetching grade records', { chunk, tableName }, err);
+            }
+          }
+        }
+
+        return results;
+      };
+
+      const buildGradesFromRecords = (records, rubricList) => {
+        const rubricNames = (rubricList || []).map(item => item.name).filter(Boolean);
+        const nextGrades = {};
+
+        (records || []).forEach(record => {
+          const fields = record.fields || record;
+          const studentField = fields[CONFIG.FIELDS.GRADES.STUDENT];
+          const studentId = Array.isArray(studentField) ? studentField[0] : studentField;
+          if (!studentId) return;
+
+          const scores = {};
+          const rubricItemName = fields['Rubric Item Name'] || fields.rubricItemName || fields.label || '';
+          const numericGrade = fields['Grade'] ?? fields.grade ?? fields.score;
+
+          // Primary schema: one record per rubric item with "Rubric Item Name" and "Grade" fields
+          if (rubricItemName && numericGrade !== undefined && numericGrade !== null && numericGrade !== '') {
+            scores[rubricItemName] = Number(numericGrade) || 0;
+          }
+
+          // Fallback: scores stored directly on fields keyed by rubric name
+          rubricNames.forEach(name => {
+            const rawScore = fields[name];
+            if (rawScore !== undefined && rawScore !== null && rawScore !== '') {
+              scores[name] = Number(rawScore) || 0;
+            }
+          });
+
+          const comments = fields[CONFIG.FIELDS.GRADES.COMMENTS] || fields.comments || '';
+          nextGrades[studentId] = {
+            scores,
+            comments,
+            completed: Object.keys(scores).length > 0 || Boolean(comments),
+            recordId: record.id || record.recordId
+          };
+        });
+
+        return nextGrades;
+      };
+
+      const hydrateFromAssignmentResponse = async (result, isContinuing) => {
+        const entry = Array.isArray(result) ? result[0] : result;
+        if (!entry) return;
+
+        const rubricFromResponse = normalizeRubricItems(entry.rubricItems || entry.rubric || entry.Rubric || entry.items);
+        if (isContinuing && rubricFromResponse.length > 0) {
+          setRubricItems(rubricFromResponse);
+        }
+
+        const rubricRecordIds = entry.rubricRecordIds || entry.Rubrics || entry['Rubrics'] || [];
+        if (Array.isArray(rubricRecordIds) && rubricRecordIds.length) {
+          const sourceRubrics = rubricFromResponse.length > 0 ? rubricFromResponse : rubricItems;
+          if (Array.isArray(sourceRubrics) && rubricRecordIds.length === sourceRubrics.length) {
+            const nextMap = {};
+            rubricRecordIds.forEach((rid, idx) => {
+              const rubricName = sourceRubrics[idx]?.name;
+              if (rubricName && rid) {
+                nextMap[rubricName] = rid;
+              }
+            });
+            if (Object.keys(nextMap).length > 0) setRubricItemIds(nextMap);
+          }
+        }
+
+        const gradeIds = Array.isArray(entry['Grades 2'])
+          ? entry['Grades 2']
+          : Array.isArray(entry.Grades)
+            ? entry.Grades
+            : Array.isArray(entry.gradeIds)
+              ? entry.gradeIds
+              : [];
+
+        let gradeRecords = Array.isArray(entry.grades) ? entry.grades : [];
+        if ((!gradeRecords || gradeRecords.length === 0) && gradeIds.length > 0) {
+          gradeRecords = await fetchGradesByIds(gradeIds);
+        }
+
+        if (gradeRecords && gradeRecords.length > 0) {
+          const hydrated = buildGradesFromRecords(gradeRecords, rubricFromResponse.length > 0 ? rubricFromResponse : rubricItems);
+          setGrades(prev => {
+            const merged = { ...prev };
+            Object.entries(hydrated).forEach(([studentId, grade]) => {
+              merged[studentId] = {
+                scores: grade.scores || {},
+                comments: grade.comments || '',
+                completed: grade.completed || false,
+                recordId: grade.recordId
+              };
+            });
+            return merged;
+          });
+        }
+      };
+
       const startGradingSession = async () => {
         if (!assignmentName.trim()) {
           alert('Please enter an assignment name.');
@@ -1189,38 +1317,47 @@
         setError(null);
 
         try {
+          const isContinuing = continuingAssignment || Boolean(assignmentRecordId) || Boolean(selectedVoiceAssignmentId);
+          let resolvedAssignmentId = assignmentRecordId || selectedVoiceAssignmentId || null;
+
           const payload = {
             teacherId: selectedTeacher?.id,
             sectionIds: selectedSections.map(s => s.id),
             assignmentName: assignmentName,
-            rubricItems: rubricItems
+            rubricItems: rubricItems,
+            assignmentRecordId: resolvedAssignmentId,
+            continuing: isContinuing
           };
 
-          // 1. Create Assignment
-          console.log('Creating assignment in n8n...');
+          // Always call the assignment webhook so we can hydrate rubric/grade metadata,
+          // but skip the rubric creation webhook when continuing.
+          console.log(isContinuing ? 'Refreshing existing assignment in n8n...' : 'Creating assignment in n8n...');
           const result = await n8nRequest(CONFIG.N8N_ASSIGNMENT_WEBHOOK_URL, payload);
           console.log('n8n assignment response:', result);
 
-          let newAssignmentId = null;
-
-          // Handle array response from n8n (as per user spec)
           if (Array.isArray(result) && result.length > 0 && result[0].id) {
-            newAssignmentId = result[0].id;
+            resolvedAssignmentId = result[0].id;
           } else if (result && result.id) {
-            // Fallback for object format
-            newAssignmentId = result.id;
+            resolvedAssignmentId = result.id;
           }
 
-          if (newAssignmentId) {
-            console.log(`Assignment created with ID: ${newAssignmentId}`);
-            setAssignmentRecordId(newAssignmentId);
+          if (resolvedAssignmentId) {
+            console.log(`Assignment ready with ID: ${resolvedAssignmentId}`);
+            setAssignmentRecordId(resolvedAssignmentId);
+          } else {
+            console.warn('No assignment ID returned from n8n. Response was:', result);
+            alert('Warning: n8n did not return an assignment ID. Grading will proceed locally but may not sync correctly.');
+          }
 
+          await hydrateFromAssignmentResponse(result, isContinuing);
+
+          if (!isContinuing && resolvedAssignmentId) {
             // 2. Send Rubric Items linked to this Assignment
             // User requested to use "Create rubric n8n post" with the assignment ID
             if (CONFIG.N8N_RUBRIC_ITEMS_WEBHOOK_URL) {
               console.log('Sending rubric items to n8n...');
               const rubricResponse = await n8nRequest(CONFIG.N8N_RUBRIC_ITEMS_WEBHOOK_URL, {
-                assignmentId: newAssignmentId,
+                assignmentId: resolvedAssignmentId,
                 rubricItems: rubricItems
               });
               console.log('Rubric items sent successfully.');
@@ -1252,11 +1389,8 @@
             } else {
               console.warn('N8N_RUBRIC_ITEMS_WEBHOOK_URL not configured. Skipping rubric sync.');
             }
-
-          } else {
-            console.warn('No assignment ID returned from n8n. Response was:', result);
-            // We can continue locally, but n8n sync might be incomplete
-            alert('Warning: n8n did not return an assignment ID. Grading will proceed locally but may not sync correctly.');
+          } else if (isContinuing) {
+            console.log('Continuing existing assignment; skipping rubric creation.');
           }
 
           setSessionId(Date.now().toString());
@@ -1264,6 +1398,7 @@
           if (firstStudent) {
             setCurrentGradingStudentId(firstStudent.id);
           }
+          setContinuingAssignment(false);
           setStep('grading');
         } catch (err) {
           console.error('Error starting grading session:', err);
@@ -1295,6 +1430,7 @@
 
         const payload = {
           assignmentRecordId: assignmentRecordId,
+          gradeRecordId: g.recordId || null,
           studentRecordId: student.id, // Airtable student record ID
           studentId: student.studentId || student.id,
           studentName: student.name,
@@ -1328,11 +1464,19 @@
       const loadVoiceGraderAssignments = async () => {
         try {
           const response = await airtableRequest(CONFIG.TABLES.VOICE_GRADER);
-          const assignments = (response.records || []).map(record => ({
-            id: record.id,
-            name: record.fields[CONFIG.FIELDS.VOICE_GRADER.ASSIGNMENT_NAME],
-            items: normalizeRubricItems(record.fields[CONFIG.FIELDS.VOICE_GRADER.RUBRIC])
-          })).filter(record => !!record.name)
+          const assignments = (response.records || []).map(record => {
+            const rubricRecordIdsRaw = record.fields['Rubrics'] || record.fields['Rubric Record Ids'] || [];
+            const rubricRecordIds = Array.isArray(rubricRecordIdsRaw)
+              ? rubricRecordIdsRaw.filter(Boolean)
+              : [];
+
+            return {
+              id: record.id,
+              name: record.fields[CONFIG.FIELDS.VOICE_GRADER.ASSIGNMENT_NAME],
+              items: normalizeRubricItems(record.fields[CONFIG.FIELDS.VOICE_GRADER.RUBRIC]),
+              rubricRecordIds
+            };
+          }).filter(record => !!record.name)
             .sort((a, b) => a.name.localeCompare(b.name));
           setVoiceGraderAssignments(assignments);
         } catch (err) {
@@ -1342,13 +1486,31 @@
 
       const handleVoiceAssignmentSelection = (assignmentId) => {
         setSelectedVoiceAssignmentId(assignmentId);
-        if (!assignmentId) return;
+        if (!assignmentId) {
+          setContinuingAssignment(false);
+          setAssignmentRecordId(null);
+          setRubricItemIds({});
+          return;
+        }
 
         const selected = voiceGraderAssignments.find(a => a.id === assignmentId);
         if (selected) {
           setAssignmentName(selected.name || '');
           const safeItems = Array.isArray(selected.items) ? selected.items : normalizeRubricItems(selected.items);
           setRubricItems(safeItems);
+          setAssignmentRecordId(selected.id);
+          setContinuingAssignment(true);
+
+          if (Array.isArray(selected.rubricRecordIds) && selected.rubricRecordIds.length === safeItems.length) {
+            const nextMap = {};
+            selected.rubricRecordIds.forEach((rid, idx) => {
+              const rubricName = safeItems[idx]?.name;
+              if (rubricName && rid) {
+                nextMap[rubricName] = rid;
+              }
+            });
+            setRubricItemIds(nextMap);
+          }
         }
       };
 
