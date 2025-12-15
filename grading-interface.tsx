@@ -357,21 +357,52 @@ export default function GradingInterface() {
   const findExistingGrade = (existingGrades, student) => {
     if (!existingGrades || !student) return null;
 
+    // Build candidate keys from various student identifiers
     const candidateKeys = [
-      student.id,
-      student.studentId,
-      student.email,
-      typeof student.name === 'string' ? student.name.trim() : null
+      student.id,                    // Airtable record ID
+      student.studentId,             // SID/Student ID number
+      student.email,                 // Email address
+      typeof student.name === 'string' ? student.name.trim() : null  // Student name
     ].filter(Boolean);
 
+    console.log('[findExistingGrade] Looking for student:', student.name, 'candidateKeys:', candidateKeys);
+
+    // First try exact matches
     for (const key of candidateKeys) {
-      if (existingGrades[key]) return existingGrades[key];
-      if (typeof key === 'string') {
-        const lower = key.toLowerCase();
-        if (existingGrades[lower]) return existingGrades[lower];
+      if (existingGrades[key]) {
+        console.log('[findExistingGrade] Found exact match with key:', key, 'scores:', existingGrades[key].scores);
+        return existingGrades[key];
       }
     }
 
+    // Then try case-insensitive matches
+    for (const key of candidateKeys) {
+      if (typeof key === 'string') {
+        const lower = key.toLowerCase();
+        if (existingGrades[lower]) {
+          console.log('[findExistingGrade] Found lowercase match with key:', lower, 'scores:', existingGrades[lower].scores);
+          return existingGrades[lower];
+        }
+      }
+    }
+
+    // Finally try matching against all gradeMap keys (for partial/fuzzy matching)
+    const allGradeKeys = Object.keys(existingGrades);
+    for (const key of candidateKeys) {
+      if (typeof key !== 'string') continue;
+      const keyLower = key.toLowerCase().trim();
+
+      // Check if any gradeMap key contains or matches this candidate
+      for (const gradeKey of allGradeKeys) {
+        const gradeKeyLower = String(gradeKey).toLowerCase().trim();
+        if (gradeKeyLower === keyLower) {
+          console.log('[findExistingGrade] Found fuzzy match with key:', gradeKey, 'scores:', existingGrades[gradeKey].scores);
+          return existingGrades[gradeKey];
+        }
+      }
+    }
+
+    console.log('[findExistingGrade] No match found for student:', student.name);
     return null;
   };
 
@@ -775,7 +806,9 @@ export default function GradingInterface() {
         };
       };
 
-      gradeRecords.forEach(grade => {
+      console.log('[GradeMap Debug] Processing', gradeRecords.length, 'grade records');
+
+      gradeRecords.forEach((grade, gradeIdx) => {
         const fields = grade.fields || grade;
         const studentField = fields[CONFIG.FIELDS.GRADES.STUDENT];
         const studentId = grade.studentId
@@ -790,15 +823,23 @@ export default function GradingInterface() {
           || fields.SID
           || null;
 
+        // Handle various possible field names for student name including Airtable lookups
         const nameKey = fields[CONFIG.FIELDS.STUDENTS.NAME]
           || fields.studentName
           || fields.name
           || fields['Student Name']
+          || fields['Name (from Student)']
+          || fields['Student Name (from Student)']
+          || fields['Name']
           || null;
 
+        // Handle various possible field names for student email including Airtable lookups
         const emailKey = fields[CONFIG.FIELDS.STUDENTS.EMAIL]
           || fields.email
           || fields['Email']
+          || fields['Email (from Student)']
+          || fields['Student Email']
+          || fields['Student Email (from Student)']
           || null;
 
         const scores: Record<string, number> = {};
@@ -817,6 +858,8 @@ export default function GradingInterface() {
         if (rubricItemName && gradeValue !== undefined && gradeValue !== null && gradeValue !== '') {
           scores[rubricItemName] = Number(gradeValue) || 0;
         }
+
+        console.log(`[GradeMap Debug] Record ${gradeIdx}: rubricItem='${rubricItemName}', grade=${gradeValue}, studentId=${numericStudentId}, scores=`, scores);
 
         // Fallback: Also try to match rubric items by looking for fields named after them
         // (in case some assignments use a different data structure)
@@ -870,6 +913,9 @@ export default function GradingInterface() {
           ...studentishValues
         ].forEach(addKey);
       });
+
+      console.log('[GradeMap Debug] Final gradeMap keys:', Object.keys(gradeMap));
+      console.log('[GradeMap Debug] Sample gradeMap entries:', Object.entries(gradeMap).slice(0, 3).map(([k, v]) => ({ key: k, scores: v.scores })));
 
       return {
         id: entry.id || entry.assignmentId || entry.voiceGraderId || entry.rubricRecordId || `assignment-${idx}`,
