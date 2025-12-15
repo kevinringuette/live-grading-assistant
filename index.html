@@ -1214,7 +1214,9 @@
         const rubricNames = (rubricList || []).map(item => item.name).filter(Boolean);
         const nextGrades = {};
 
-        (records || []).forEach(record => {
+        console.log('[buildGradesFromRecords] Processing', records?.length || 0, 'grade records');
+
+        (records || []).forEach((record, idx) => {
           const fields = record.fields || record;
           const studentField = fields[CONFIG.FIELDS.GRADES.STUDENT];
           const studentId = Array.isArray(studentField) ? studentField[0] : studentField;
@@ -1238,14 +1240,25 @@
           });
 
           const comments = fields[CONFIG.FIELDS.GRADES.COMMENTS] || fields.comments || '';
+
+          // MERGE with existing entry for this student instead of overwriting
+          const existing = nextGrades[studentId] || { scores: {}, comments: '', completed: false, recordId: null };
+          const mergedScores = { ...existing.scores, ...scores };
+          const mergedComments = existing.comments
+            ? (comments && comments !== existing.comments ? `${existing.comments}\n${comments}` : existing.comments)
+            : comments;
+
           nextGrades[studentId] = {
-            scores,
-            comments,
-            completed: Object.keys(scores).length > 0 || Boolean(comments),
-            recordId: record.id || record.recordId
+            scores: mergedScores,
+            comments: mergedComments,
+            completed: Object.keys(mergedScores).length > 0 || Boolean(mergedComments),
+            recordId: existing.recordId || record.id || record.recordId
           };
+
+          console.log(`[buildGradesFromRecords] Record ${idx}: studentId=${studentId}, rubricItem='${rubricItemName}', grade=${numericGrade}, mergedScores=`, mergedScores);
         });
 
+        console.log('[buildGradesFromRecords] Final grades for', Object.keys(nextGrades).length, 'students');
         return nextGrades;
       };
 
