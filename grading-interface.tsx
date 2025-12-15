@@ -354,6 +354,27 @@ export default function GradingInterface() {
     setSelectedRubricOption('');
   }, [selectedTeacher]);
 
+  const findExistingGrade = (existingGrades, student) => {
+    if (!existingGrades || !student) return null;
+
+    const candidateKeys = [
+      student.id,
+      student.studentId,
+      student.email,
+      typeof student.name === 'string' ? student.name.trim() : null
+    ].filter(Boolean);
+
+    for (const key of candidateKeys) {
+      if (existingGrades[key]) return existingGrades[key];
+      if (typeof key === 'string') {
+        const lower = key.toLowerCase();
+        if (existingGrades[lower]) return existingGrades[lower];
+      }
+    }
+
+    return null;
+  };
+
   const loadStudentsForSections = async (sectionsToLoad, existingGrades = null) => {
     setLoading(true);
     setError(null);
@@ -396,7 +417,7 @@ export default function GradingInterface() {
       const nextGradeRecordIds: Record<string, string> = {};
 
       studentsList.forEach(student => {
-        const existing = existingGrades ? existingGrades[student.id] : null;
+        const existing = findExistingGrade(existingGrades, student);
         initialGrades[student.id] = {
           scores: existing?.scores || {},
           comments: existing?.comments || '',
@@ -702,13 +723,13 @@ export default function GradingInterface() {
         || []
       ).filter(Boolean);
 
-      const gradeRecordIds = Array.isArray(entry['Grades 2'])
-        ? entry['Grades 2']
-        : Array.isArray(entry.grades2)
-          ? entry.grades2
-          : Array.isArray(entry.Grades)
-            ? entry.Grades
-            : [];
+      const gradeRecordIds = Array.from(new Set([
+        ...(Array.isArray(entry['Grades 2']) ? entry['Grades 2'] : []),
+        ...(Array.isArray(entry.grades2) ? entry.grades2 : []),
+        ...(Array.isArray(entry.Grades) ? entry.Grades : []),
+        ...(Array.isArray(entry['Voice Grader Final Grade']) ? entry['Voice Grader Final Grade'] : []),
+        ...(Array.isArray(entry.voiceGraderFinalGrade) ? entry.voiceGraderFinalGrade : [])
+      ].filter(Boolean)));
 
       let gradeRecords = Array.isArray(entry.grades)
         ? entry.grades
@@ -721,18 +742,62 @@ export default function GradingInterface() {
         const tableHints = [] as string[];
         if (explicitTable) tableHints.push(explicitTable);
         if (entry.gradeTableName) tableHints.push(entry.gradeTableName);
+        if (entry.voiceGraderGradeTable) tableHints.push(entry.voiceGraderGradeTable);
+        tableHints.push('Voice Grader Final Grade');
         gradeRecords = await fetchGradesByIds(gradeRecordIds, tableHints);
       }
 
       const gradeMap: Record<string, any> = {};
+
+      const mergeGradeEntries = (existingEntry: any, incomingEntry: any) => {
+        if (!existingEntry) return incomingEntry;
+
+        const mergedScores = { ...existingEntry.scores };
+        Object.entries(incomingEntry.scores || {}).forEach(([key, value]) => {
+          if (value !== undefined && value !== null) {
+            mergedScores[key] = value as number;
+          }
+        });
+
+        const existingComment = (existingEntry.comments || '').toString().trim();
+        const incomingComment = (incomingEntry.comments || '').toString().trim();
+        const combinedComments = existingComment
+          ? incomingComment && incomingComment !== existingComment
+            ? `${existingComment}\n${incomingComment}`
+            : existingComment
+          : incomingComment;
+
+        return {
+          scores: mergedScores,
+          comments: combinedComments,
+          completed: Object.keys(mergedScores).length > 0 || Boolean(combinedComments),
+          recordId: existingEntry.recordId || incomingEntry.recordId
+        };
+      };
+
       gradeRecords.forEach(grade => {
         const fields = grade.fields || grade;
         const studentField = fields[CONFIG.FIELDS.GRADES.STUDENT];
         const studentId = grade.studentId
           || grade.student
           || grade.studentRecordId
-          || (Array.isArray(studentField) ? studentField[0] : null);
-        if (!studentId) return;
+          || (Array.isArray(studentField) ? studentField[0] : studentField);
+
+        const numericStudentId = fields[CONFIG.FIELDS.STUDENTS.ID]
+          || fields['Student ID']
+          || fields['StudentID']
+          || null;
+
+        const nameKey = fields[CONFIG.FIELDS.STUDENTS.NAME]
+          || fields.studentName
+          || fields.name
+          || fields['Student Name']
+          || null;
+
+        const emailKey = fields[CONFIG.FIELDS.STUDENTS.EMAIL]
+          || fields.email
+          || fields['Email']
+          || null;
 
         const scores: Record<string, number> = {};
         rubricItems.forEach(item => {
@@ -743,12 +808,46 @@ export default function GradingInterface() {
         });
 
         const comments = fields[CONFIG.FIELDS.GRADES.COMMENTS] || fields.comments || '';
-        gradeMap[studentId] = {
+        const gradeEntry = {
           scores,
           comments,
           completed: Object.keys(scores).length > 0 || Boolean(comments),
           recordId: grade.id || grade.recordId
         };
+
+        const addKey = (key: any) => {
+          if (key === undefined || key === null) return;
+          const normalizedKey = typeof key === 'string' ? key.trim() : String(key);
+          if (!normalizedKey) return;
+          const existing = gradeMap[normalizedKey];
+          const merged = mergeGradeEntries(existing, gradeEntry);
+          gradeMap[normalizedKey] = merged;
+          if (typeof normalizedKey === 'string') {
+            const lowerKey = normalizedKey.toLowerCase();
+            const existingLower = gradeMap[lowerKey];
+            gradeMap[lowerKey] = mergeGradeEntries(existingLower, gradeEntry);
+          }
+        };
+
+        const arrayStudentKeys = Array.isArray(studentField) ? studentField : [];
+        const extraStudentIdFields = Object.entries(fields)
+          .filter(([key]) => key.toLowerCase().includes('student id'))
+          .map(([, value]) => value);
+
+        const studentishValues = Object.entries(fields)
+          .filter(([key]) => key.toLowerCase().includes('student'))
+          .map(([, value]) => value)
+          .flat();
+
+        [
+          studentId,
+          numericStudentId,
+          nameKey,
+          emailKey,
+          ...arrayStudentKeys,
+          ...extraStudentIdFields,
+          ...studentishValues
+        ].forEach(addKey);
       });
 
       return {
