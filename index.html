@@ -1194,7 +1194,7 @@
 
         for (const chunk of chunks) {
           const formula = `OR(${chunk.map(id => `RECORD_ID()='${id}'`).join(',')})`;
-          for (const tableName of ['Grades', 'Grades 2']) {
+          for (const tableName of ['Grades']) {
             try {
               const response = await airtableRequest(`${tableName}?filterByFormula=${encodeURIComponent(formula)}`);
               if (Array.isArray(response.records) && response.records.length > 0) {
@@ -1273,13 +1273,11 @@
           }
         }
 
-        const gradeIds = Array.isArray(entry['Grades 2'])
-          ? entry['Grades 2']
-          : Array.isArray(entry.Grades)
-            ? entry.Grades
-            : Array.isArray(entry.gradeIds)
-              ? entry.gradeIds
-              : [];
+        const gradeIds = Array.from(new Set([
+          ...(Array.isArray(entry.Grades) ? entry.Grades : []),
+          ...(Array.isArray(entry.gradeIds) ? entry.gradeIds : []),
+          ...(Array.isArray(entry['Grades 2']) ? entry['Grades 2'] : [])
+        ].filter(Boolean)));
 
         let gradeRecords = Array.isArray(entry.grades) ? entry.grades : [];
         if ((!gradeRecords || gradeRecords.length === 0) && gradeIds.length > 0) {

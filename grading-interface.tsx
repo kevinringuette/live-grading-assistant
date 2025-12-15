@@ -673,7 +673,6 @@ export default function GradingInterface() {
     const tablesToTry = Array.from(
       new Set([
         CONFIG.TABLES.GRADES,
-        'Grades 2',
         ...(Array.isArray(tableNames) ? tableNames : [])
       ].filter(Boolean))
     );
@@ -724,9 +723,10 @@ export default function GradingInterface() {
       ).filter(Boolean);
 
       const gradeRecordIds = Array.from(new Set([
+        ...(Array.isArray(entry.Grades) ? entry.Grades : []),
+        ...(Array.isArray(entry.gradeIds) ? entry.gradeIds : []),
         ...(Array.isArray(entry['Grades 2']) ? entry['Grades 2'] : []),
         ...(Array.isArray(entry.grades2) ? entry.grades2 : []),
-        ...(Array.isArray(entry.Grades) ? entry.Grades : []),
         ...(Array.isArray(entry['Voice Grader Final Grade']) ? entry['Voice Grader Final Grade'] : []),
         ...(Array.isArray(entry.voiceGraderFinalGrade) ? entry.voiceGraderFinalGrade : [])
       ].filter(Boolean)));
