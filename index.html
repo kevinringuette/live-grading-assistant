@@ -710,6 +710,8 @@
       const [rubricItemIds, setRubricItemIds] = useState({}); // Maps rubric name to Airtable record ID
       const [continuingAssignment, setContinuingAssignment] = useState(false);
       const [grades, setGrades] = useState({});
+      const [showAssignmentPicker, setShowAssignmentPicker] = useState(false);
+      const [assignmentPickerQuery, setAssignmentPickerQuery] = useState('');
       const [currentStudent, setCurrentStudent] = useState(null);
 
       const [transcript, setTranscript] = useState([]);
@@ -3306,29 +3308,78 @@
                     <label className="block text-xs font-semibold text-pacifica-slate uppercase tracking-wide mb-1">
                       Load rubric from Voice Grader
                     </label>
-                    <div className="flex flex-col gap-2 sm:flex-row">
-                      <select
-                        value={selectedVoiceAssignmentId}
-                        onChange={(e) => handleVoiceAssignmentSelection(e.target.value)}
-                        disabled={voiceGraderAssignments.length === 0}
-                        className="flex-1 px-3 py-2 border-2 border-pacifica-gray rounded-lg focus:ring-2 focus:ring-pacifica-orange focus:border-transparent disabled:bg-pacifica-gray/20 disabled:text-pacifica-slate"
-                      >
-                        <option value="">
-                          {voiceGraderAssignments.length === 0 ? 'No assignments available' : 'Select an assignment to load rubric'}
-                        </option>
-                        {voiceGraderAssignments.map(assignment => (
-                          <option key={assignment.id} value={assignment.id}>
-                            {assignment.name} • {assignment.items.length} items
-                          </option>
-                        ))}
-                      </select>
-                    </div>
+                    <button
+                      onClick={() => {
+                        setAssignmentPickerQuery('');
+                        setShowAssignmentPicker(true);
+                      }}
+                      disabled={voiceGraderAssignments.length === 0}
+                      className="w-full px-4 py-3 border-2 border-pacifica-navy rounded-lg hover:bg-pacifica-navy hover:bg-opacity-10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-left flex items-center justify-between"
+                    >
+                      <span className="text-pacifica-navy font-medium">
+                        {selectedVoiceAssignmentId
+                          ? voiceGraderAssignments.find(a => a.id === selectedVoiceAssignmentId)?.name || 'Select Past Assignment'
+                          : 'Select Past Assignment'}
+                      </span>
+                      <Icon name="ChevronRight" className="w-5 h-5 text-pacifica-navy" />
+                    </button>
                     {voiceGraderAssignments.length === 0 && (
                       <p className="text-xs text-pacifica-slate mt-2">
                         Add assignments with rubrics to the Voice Grader table to see them here.
                       </p>
                     )}
                   </div>
+
+                  {/* Assignment Picker Modal */}
+                  {showAssignmentPicker && (
+                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                      <div className="bg-white rounded-lg shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col">
+                        <div className="p-4 border-b border-pacifica-gray">
+                          <div className="flex items-center justify-between mb-3">
+                            <h3 className="text-lg font-bold text-pacifica-navy">Select Past Assignment</h3>
+                            <button
+                              onClick={() => setShowAssignmentPicker(false)}
+                              className="p-1 hover:bg-pacifica-gray rounded-full transition-colors"
+                            >
+                              <Icon name="X" className="w-5 h-5 text-pacifica-slate" />
+                            </button>
+                          </div>
+                          <input
+                            type="text"
+                            placeholder="Search assignments..."
+                            value={assignmentPickerQuery}
+                            onChange={(e) => setAssignmentPickerQuery(e.target.value)}
+                            className="w-full px-3 py-2 border-2 border-pacifica-gray rounded-lg focus:ring-2 focus:ring-pacifica-orange focus:border-transparent"
+                            autoFocus
+                          />
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-2">
+                          {voiceGraderAssignments
+                            .filter(a => a.name.toLowerCase().includes(assignmentPickerQuery.toLowerCase()))
+                            .map(assignment => (
+                              <button
+                                key={assignment.id}
+                                onClick={() => {
+                                  handleVoiceAssignmentSelection(assignment.id);
+                                  setShowAssignmentPicker(false);
+                                }}
+                                className={`w-full text-left p-3 rounded-lg mb-1 transition-colors ${
+                                  selectedVoiceAssignmentId === assignment.id
+                                    ? 'bg-pacifica-orange bg-opacity-20 border-2 border-pacifica-orange'
+                                    : 'hover:bg-pacifica-gray border-2 border-transparent'
+                                }`}
+                              >
+                                <p className="font-semibold text-pacifica-navy">{assignment.name}</p>
+                                <p className="text-sm text-pacifica-slate">{assignment.items.length} rubric items</p>
+                              </button>
+                            ))}
+                          {voiceGraderAssignments.filter(a => a.name.toLowerCase().includes(assignmentPickerQuery.toLowerCase())).length === 0 && (
+                            <p className="text-center text-pacifica-slate py-4">No assignments found</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   <div className="space-y-3">
                     {rubricItems.map((item, idx) => (
                       <div key={idx} className="flex gap-3 items-center">
