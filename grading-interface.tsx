@@ -354,6 +354,23 @@ export default function GradingInterface() {
     setSelectedRubricOption('');
   }, [selectedTeacher]);
 
+  const findExistingGrade = (existingGrades, student) => {
+    if (!existingGrades || !student) return null;
+
+    const candidateKeys = [
+      student.id,
+      student.studentId,
+      student.email,
+      typeof student.name === 'string' ? student.name.trim() : null
+    ].filter(Boolean);
+
+    for (const key of candidateKeys) {
+      if (existingGrades[key]) return existingGrades[key];
+    }
+
+    return null;
+  };
+
   const loadStudentsForSections = async (sectionsToLoad, existingGrades = null) => {
     setLoading(true);
     setError(null);
@@ -396,7 +413,7 @@ export default function GradingInterface() {
       const nextGradeRecordIds: Record<string, string> = {};
 
       studentsList.forEach(student => {
-        const existing = existingGrades ? existingGrades[student.id] : null;
+        const existing = findExistingGrade(existingGrades, student);
         initialGrades[student.id] = {
           scores: existing?.scores || {},
           comments: existing?.comments || '',
@@ -732,7 +749,16 @@ export default function GradingInterface() {
           || grade.student
           || grade.studentRecordId
           || (Array.isArray(studentField) ? studentField[0] : null);
-        if (!studentId) return;
+
+        const numericStudentId = fields[CONFIG.FIELDS.STUDENTS.ID]
+          || fields['Student ID']
+          || fields['StudentID']
+          || null;
+
+        const nameKey = fields[CONFIG.FIELDS.STUDENTS.NAME]
+          || fields.studentName
+          || fields.name
+          || null;
 
         const scores: Record<string, number> = {};
         rubricItems.forEach(item => {
@@ -743,12 +769,18 @@ export default function GradingInterface() {
         });
 
         const comments = fields[CONFIG.FIELDS.GRADES.COMMENTS] || fields.comments || '';
-        gradeMap[studentId] = {
+        const gradeEntry = {
           scores,
           comments,
           completed: Object.keys(scores).length > 0 || Boolean(comments),
           recordId: grade.id || grade.recordId
         };
+
+        [studentId, numericStudentId, nameKey].forEach(key => {
+          if (!key) return;
+          const normalizedKey = typeof key === 'string' ? key.trim() : String(key);
+          gradeMap[normalizedKey] = gradeEntry;
+        });
       });
 
       return {
