@@ -723,13 +723,13 @@ export default function GradingInterface() {
         || []
       ).filter(Boolean);
 
-      const gradeRecordIds = Array.isArray(entry['Grades 2'])
-        ? entry['Grades 2']
-        : Array.isArray(entry.grades2)
-          ? entry.grades2
-          : Array.isArray(entry.Grades)
-            ? entry.Grades
-            : [];
+      const gradeRecordIds = Array.from(new Set([
+        ...(Array.isArray(entry['Grades 2']) ? entry['Grades 2'] : []),
+        ...(Array.isArray(entry.grades2) ? entry.grades2 : []),
+        ...(Array.isArray(entry.Grades) ? entry.Grades : []),
+        ...(Array.isArray(entry['Voice Grader Final Grade']) ? entry['Voice Grader Final Grade'] : []),
+        ...(Array.isArray(entry.voiceGraderFinalGrade) ? entry.voiceGraderFinalGrade : [])
+      ].filter(Boolean)));
 
       let gradeRecords = Array.isArray(entry.grades)
         ? entry.grades
@@ -742,6 +742,8 @@ export default function GradingInterface() {
         const tableHints = [] as string[];
         if (explicitTable) tableHints.push(explicitTable);
         if (entry.gradeTableName) tableHints.push(entry.gradeTableName);
+        if (entry.voiceGraderGradeTable) tableHints.push(entry.voiceGraderGradeTable);
+        tableHints.push('Voice Grader Final Grade');
         gradeRecords = await fetchGradesByIds(gradeRecordIds, tableHints);
       }
 
@@ -832,13 +834,19 @@ export default function GradingInterface() {
           .filter(([key]) => key.toLowerCase().includes('student id'))
           .map(([, value]) => value);
 
+        const studentishValues = Object.entries(fields)
+          .filter(([key]) => key.toLowerCase().includes('student'))
+          .map(([, value]) => value)
+          .flat();
+
         [
           studentId,
           numericStudentId,
           nameKey,
           emailKey,
           ...arrayStudentKeys,
-          ...extraStudentIdFields
+          ...extraStudentIdFields,
+          ...studentishValues
         ].forEach(addKey);
       });
 
