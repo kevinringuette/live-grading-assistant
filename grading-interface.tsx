@@ -640,7 +640,33 @@ export default function GradingInterface() {
     }
   };
 
-  const normalizeWebhookAssignments = (payload) => {
+  const fetchGradesByIds = async (gradeIds: string[] = []) => {
+    if (!gradeIds || gradeIds.length === 0) return [];
+
+    const chunks: string[][] = [];
+    for (let i = 0; i < gradeIds.length; i += 10) {
+      chunks.push(gradeIds.slice(i, i + 10));
+    }
+
+    const results: any[] = [];
+    for (const chunk of chunks) {
+      const formula = `OR(${chunk.map(id => `RECORD_ID()='${id}'`).join(',')})`;
+      try {
+        const response = await airtableRequest(
+          `${CONFIG.TABLES.GRADES}?filterByFormula=${encodeURIComponent(formula)}`
+        );
+        if (Array.isArray(response.records)) {
+          results.push(...response.records);
+        }
+      } catch (err) {
+        console.error('Error fetching grade records by id chunk', chunk, err);
+      }
+    }
+
+    return results;
+  };
+
+  const normalizeWebhookAssignments = async (payload) => {
     const listCandidates = Array.isArray(payload?.assignments)
       ? payload.assignments
       : Array.isArray(payload)
@@ -649,16 +675,39 @@ export default function GradingInterface() {
           ? payload.data
           : [];
 
-    return (listCandidates || []).map((entry, idx) => {
+    return Promise.all((listCandidates || []).map(async (entry, idx) => {
       const rubricItems = normalizeRubricItems(
-        entry.rubricItems ?? entry.rubric ?? entry.items ?? entry.rubrics
+        entry.rubricItems
+        ?? entry.rubric
+        ?? entry.items
+        ?? entry.rubrics
+        ?? entry.Rubric
       );
-      const sectionIds = (entry.sectionIds || entry.sections || []).filter(Boolean);
-      const gradeRecords = Array.isArray(entry.grades)
+      const sectionIds = (
+        entry.sectionIds
+        || entry.sections
+        || entry.Section
+        || entry.section
+        || []
+      ).filter(Boolean);
+
+      const gradeRecordIds = Array.isArray(entry['Grades 2'])
+        ? entry['Grades 2']
+        : Array.isArray(entry.grades2)
+          ? entry.grades2
+          : Array.isArray(entry.Grades)
+            ? entry.Grades
+            : [];
+
+      let gradeRecords = Array.isArray(entry.grades)
         ? entry.grades
         : Array.isArray(entry.gradeRecords)
           ? entry.gradeRecords
           : [];
+
+      if ((!gradeRecords || gradeRecords.length === 0) && gradeRecordIds.length > 0) {
+        gradeRecords = await fetchGradesByIds(gradeRecordIds);
+      }
 
       const gradeMap: Record<string, any> = {};
       gradeRecords.forEach(grade => {
@@ -717,7 +766,7 @@ export default function GradingInterface() {
       }
 
       const data = await response.json();
-      const normalized = normalizeWebhookAssignments(data);
+      const normalized = await normalizeWebhookAssignments(data);
       setAssignmentOptions(normalized);
     } catch (err) {
       console.error('Error loading existing assignments:', err);
