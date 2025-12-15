@@ -366,6 +366,10 @@ export default function GradingInterface() {
 
     for (const key of candidateKeys) {
       if (existingGrades[key]) return existingGrades[key];
+      if (typeof key === 'string') {
+        const lower = key.toLowerCase();
+        if (existingGrades[lower]) return existingGrades[lower];
+      }
     }
 
     return null;
@@ -748,7 +752,7 @@ export default function GradingInterface() {
         const studentId = grade.studentId
           || grade.student
           || grade.studentRecordId
-          || (Array.isArray(studentField) ? studentField[0] : null);
+          || (Array.isArray(studentField) ? studentField[0] : studentField);
 
         const numericStudentId = fields[CONFIG.FIELDS.STUDENTS.ID]
           || fields['Student ID']
@@ -758,6 +762,12 @@ export default function GradingInterface() {
         const nameKey = fields[CONFIG.FIELDS.STUDENTS.NAME]
           || fields.studentName
           || fields.name
+          || fields['Student Name']
+          || null;
+
+        const emailKey = fields[CONFIG.FIELDS.STUDENTS.EMAIL]
+          || fields.email
+          || fields['Email']
           || null;
 
         const scores: Record<string, number> = {};
@@ -776,11 +786,29 @@ export default function GradingInterface() {
           recordId: grade.id || grade.recordId
         };
 
-        [studentId, numericStudentId, nameKey].forEach(key => {
-          if (!key) return;
+        const addKey = (key: any) => {
+          if (key === undefined || key === null) return;
           const normalizedKey = typeof key === 'string' ? key.trim() : String(key);
+          if (!normalizedKey) return;
           gradeMap[normalizedKey] = gradeEntry;
-        });
+          if (typeof normalizedKey === 'string' && normalizedKey.toLowerCase() !== normalizedKey) {
+            gradeMap[normalizedKey.toLowerCase()] = gradeEntry;
+          }
+        };
+
+        const arrayStudentKeys = Array.isArray(studentField) ? studentField : [];
+        const extraStudentIdFields = Object.entries(fields)
+          .filter(([key]) => key.toLowerCase().includes('student id'))
+          .map(([, value]) => value);
+
+        [
+          studentId,
+          numericStudentId,
+          nameKey,
+          emailKey,
+          ...arrayStudentKeys,
+          ...extraStudentIdFields
+        ].forEach(addKey);
       });
 
       return {
