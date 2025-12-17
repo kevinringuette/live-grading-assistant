@@ -1087,11 +1087,42 @@ export default function GradingInterface() {
       await loadStudentsForSections(matchingSections, assignment.gradeMap || null);
     } else {
       setGradeRecordIds({});
+      alert('Warning: No sections from this assignment match your current available sections. The assignment has been loaded, but you may need to select sections manually.');
+      return; // Don't proceed to grading if no sections match
     }
 
     if (assignment.voiceGraderId || assignment.id) {
       setActiveAssignmentId(assignment.voiceGraderId || assignment.id);
     }
+
+    // Upload sections to Voice Grader table
+    setLoading(true);
+    try {
+      // Use the assignment data directly since state updates are async
+      const vgFields = CONFIG.FIELDS.Voice_Grader;
+      const sectionFieldName = vgFields.SECTIONS || CONFIG.FIELDS.TEACHERS.SECTIONS || 'Master Sections';
+      const fields: Record<string, any> = {
+        [vgFields.ASSIGNMENT_NAME]: assignmentLabel,
+        [vgFields.TEACHER]: [selectedTeacher.id],
+        [vgFields.RUBRIC]: JSON.stringify(assignment.rubricItems || []),
+        [sectionFieldName]: matchingSections.map(s => s.id)
+      };
+
+      const assignmentId = assignment.voiceGraderId || assignment.id;
+      if (assignmentId) {
+        await airtableRequest(`${CONFIG.TABLES.VOICE_GRADER}/${assignmentId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ fields })
+        });
+      }
+    } catch (err) {
+      console.error('Error syncing Voice Grader record:', err);
+    } finally {
+      setLoading(false);
+    }
+
+    // Skip setup screen and go directly to grading
+    setStep('grading');
   };
 
   const normalizeAssignment = (name: string) => (name || '').trim().toLowerCase();
@@ -1370,37 +1401,87 @@ export default function GradingInterface() {
                 <p className="text-gray-600">No sections found for this teacher.</p>
               </div>
             ) : (
-              <div className="space-y-3">
-                {sections.map(section => {
-                  const isSelected = selectedSections.some(s => s.id === section.id);
-                  return (
+              <div className="space-y-6">
+                <div className="space-y-3">
+                  {sections.map(section => {
+                    const isSelected = selectedSections.some(s => s.id === section.id);
+                    return (
+                      <button
+                        key={section.id}
+                        onClick={() => toggleSectionSelection(section)}
+                        className={`w-full text-left p-4 border rounded-lg transition-all ${
+                          isSelected
+                            ? 'border-blue-500 bg-blue-50'
+                            : 'border-gray-200 hover:border-blue-400 hover:bg-blue-50'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="font-semibold text-gray-900">{section.name}</p>
+                            <p className="text-sm text-gray-500">{section.studentCount} students</p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm text-gray-600">Select</span>
+                            <input type="checkbox" readOnly checked={isSelected} className="h-4 w-4" />
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="border-t border-gray-200 pt-6">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-3">
+                    <div>
+                      <p className="text-sm font-semibold text-gray-900">Or continue a previous assignment</p>
+                      <p className="text-xs text-gray-600">Load assignment with sections and grades from Airtable.</p>
+                    </div>
                     <button
-                      key={section.id}
-                      onClick={() => toggleSectionSelection(section)}
-                      className={`w-full text-left p-4 border rounded-lg transition-all ${
-                        isSelected
-                          ? 'border-blue-500 bg-blue-50'
-                          : 'border-gray-200 hover:border-blue-400 hover:bg-blue-50'
-                      }`}
+                      onClick={fetchExistingAssignments}
+                      className="inline-flex items-center gap-1 text-sm text-blue-700 hover:text-blue-800"
                     >
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <p className="font-semibold text-gray-900">{section.name}</p>
-                          <p className="text-sm text-gray-500">{section.studentCount} students</p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm text-gray-600">Select</span>
-                          <input type="checkbox" readOnly checked={isSelected} className="h-4 w-4" />
-                        </div>
-                      </div>
+                      <Download className="w-4 h-4" /> Refresh list
                     </button>
-                  );
-                })}
+                  </div>
+
+                  <div className="p-4 border border-indigo-100 rounded-lg bg-indigo-50">
+                    {assignmentOptionsLoading ? (
+                      <div className="flex items-center gap-2 text-indigo-800 text-sm">
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-indigo-600"></div>
+                        Loading assignments...
+                      </div>
+                    ) : assignmentOptionsError ? (
+                      <p className="text-sm text-red-600">{assignmentOptionsError}</p>
+                    ) : assignmentOptions.length === 0 ? (
+                      <p className="text-sm text-indigo-900">No existing assignments found for this teacher yet.</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {assignmentOptions.map(option => (
+                          <div key={option.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-white border border-indigo-200 rounded-md p-3">
+                            <div>
+                              <p className="text-sm font-semibold text-gray-900">{option.name || 'Untitled assignment'}</p>
+                              <p className="text-xs text-gray-600">
+                                {option.rubricItems?.length || 0} rubric item{(option.rubricItems?.length || 0) === 1 ? '' : 's'} • {option.sectionIds?.length || 0} section{(option.sectionIds?.length || 0) === 1 ? '' : 's'}
+                              </p>
+                            </div>
+                            <button
+                              onClick={() => applyExistingAssignment(option)}
+                              className="inline-flex items-center gap-1 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                            >
+                              <Upload className="w-4 h-4" /> Load assignment
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
                 <button
                   onClick={proceedWithSections}
-                  className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition-colors mt-2"
+                  className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition-colors"
                 >
-                  Continue with {selectedSections.length || 'no'} section{selectedSections.length === 1 ? '' : 's'}
+                  Create new assignment with {selectedSections.length || 'no'} section{selectedSections.length === 1 ? '' : 's'}
                 </button>
               </div>
             )}
@@ -1428,53 +1509,6 @@ export default function GradingInterface() {
             <p className="text-gray-600 mb-8">
               {selectedTeacher?.name} - {selectedSections.length > 0 ? selectedSections.map(s => s.name).join(', ') : 'No section selected'}
             </p>
-
-            <div className="mb-8">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-3">
-                <div>
-                  <p className="text-sm font-semibold text-gray-900">Continue a previous assignment</p>
-                  <p className="text-xs text-gray-600">Load rubric and existing grades from Airtable via the assignment webhook.</p>
-                </div>
-                <button
-                  onClick={fetchExistingAssignments}
-                  className="inline-flex items-center gap-1 text-sm text-blue-700 hover:text-blue-800"
-                >
-                  <Download className="w-4 h-4" /> Refresh list
-                </button>
-              </div>
-
-              <div className="p-4 border border-indigo-100 rounded-lg bg-indigo-50">
-                {assignmentOptionsLoading ? (
-                  <div className="flex items-center gap-2 text-indigo-800 text-sm">
-                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-indigo-600"></div>
-                    Loading assignments...
-                  </div>
-                ) : assignmentOptionsError ? (
-                  <p className="text-sm text-red-600">{assignmentOptionsError}</p>
-                ) : assignmentOptions.length === 0 ? (
-                  <p className="text-sm text-indigo-900">No existing assignments found for this teacher yet.</p>
-                ) : (
-                  <div className="space-y-3">
-                    {assignmentOptions.map(option => (
-                      <div key={option.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-white border border-indigo-200 rounded-md p-3">
-                        <div>
-                          <p className="text-sm font-semibold text-gray-900">{option.name || 'Untitled assignment'}</p>
-                          <p className="text-xs text-gray-600">
-                            {option.rubricItems?.length || 0} rubric item{(option.rubricItems?.length || 0) === 1 ? '' : 's'} • {option.sectionIds?.length || 0} section{(option.sectionIds?.length || 0) === 1 ? '' : 's'}
-                          </p>
-                        </div>
-                        <button
-                          onClick={() => applyExistingAssignment(option)}
-                          className="inline-flex items-center gap-1 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700"
-                        >
-                          <Upload className="w-4 h-4" /> Load assignment
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
 
             <div className="mb-8">
               <label className="block text-sm font-semibold text-gray-900 mb-2">
