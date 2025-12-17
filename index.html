@@ -1679,6 +1679,31 @@
           });
           setGrades(initialGrades);
 
+          // Hydrate any existing grades linked to this assignment
+          try {
+            const assignmentRecord = await airtableRequest(`${CONFIG.TABLES.VOICE_GRADER}/${assignment.id}`);
+            const gradeIds = Array.from(new Set([
+              ...(Array.isArray(assignmentRecord?.fields?.['Grades']) ? assignmentRecord.fields['Grades'] : []),
+              ...(Array.isArray(assignmentRecord?.fields?.['Grades 2']) ? assignmentRecord.fields['Grades 2'] : [])
+            ].filter(Boolean)));
+
+            if (gradeIds.length > 0) {
+              const gradeRecords = await fetchGradesByIds(gradeIds);
+              if (gradeRecords && gradeRecords.length > 0) {
+                const hydrated = buildGradesFromRecords(
+                  gradeRecords,
+                  Array.isArray(assignment.items) ? assignment.items : normalizeRubricItems(assignment.items)
+                );
+                setGrades(prev => ({
+                  ...prev,
+                  ...hydrated
+                }));
+              }
+            }
+          } catch (hydrateErr) {
+            console.warn('[selectPastAssignmentAndGrade] Unable to hydrate existing grades:', hydrateErr);
+          }
+
           console.log('[selectPastAssignmentAndGrade] Going to grading step');
 
           // Go directly to grading
