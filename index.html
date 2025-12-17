@@ -3088,10 +3088,24 @@
 
         setIsSubmittingFinal(true);
         try {
-          await airtableRequest(CONFIG.TABLES.FINAL_VOICE_GRADES, {
-            method: 'POST',
-            body: JSON.stringify({ records })
-          });
+          // Batch records into chunks of 10 (Airtable's batch limit)
+          const BATCH_SIZE = 10;
+          const batches = [];
+          for (let i = 0; i < records.length; i += BATCH_SIZE) {
+            batches.push(records.slice(i, i + BATCH_SIZE));
+          }
+
+          // Submit each batch sequentially
+          let totalSubmitted = 0;
+          for (let i = 0; i < batches.length; i++) {
+            await airtableRequest(CONFIG.TABLES.FINAL_VOICE_GRADES, {
+              method: 'POST',
+              body: JSON.stringify({ records: batches[i] })
+            });
+            totalSubmitted += batches[i].length;
+            console.log(`Submitted batch ${i + 1}/${batches.length} (${totalSubmitted}/${records.length} records)`);
+          }
+
           const gradesUrl = 'https://airtable.com/appTwYDVvnYPB8D2N/pagt9FO69wXKCk2qL?CGk9H=recQ19nLDeTEYQgRO&dbGhe=recQrQHJSvoKBE4h8';
           const modal = document.createElement('div');
           modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50';
