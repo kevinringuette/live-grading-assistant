@@ -4594,6 +4594,24 @@
                         >
                           Comments
                         </th>
+                        <th className="px-2 py-3 text-center text-xs font-semibold text-pacifica-navy border-b-2 border-pacifica-gray w-16">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const gradedStudents = students.filter(s => grades[s.id]?.completed);
+                              if (selectedEmailStudentIds.length === gradedStudents.length && gradedStudents.length > 0) {
+                                clearEmailRecipients();
+                              } else {
+                                selectAllEmailRecipients();
+                              }
+                            }}
+                            className="px-2 py-1 text-xs font-medium text-pacifica-orange bg-pacifica-orange bg-opacity-10 border border-pacifica-orange rounded hover:bg-opacity-20 transition-colors whitespace-nowrap"
+                            title={selectedEmailStudentIds.length === students.filter(s => grades[s.id]?.completed).length ? 'Deselect All' : 'Select All'}
+                          >
+                            {selectedEmailStudentIds.length === students.filter(s => grades[s.id]?.completed).length && students.filter(s => grades[s.id]?.completed).length > 0 ? '✓ All' : 'Select'}
+                          </button>
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
@@ -4716,75 +4734,21 @@
                                 placeholder="Click to add comments..."
                               />
                             </td>
+                            <td className="px-2 py-2 text-center">
+                              <input
+                                type="checkbox"
+                                className="w-5 h-5 accent-pacifica-orange cursor-pointer"
+                                disabled={!sg.completed}
+                                checked={sg.completed && selectedEmailStudentIds.includes(student.id)}
+                                onChange={() => handleEmailRecipientToggle(student.id)}
+                                title={sg.completed ? 'Select for email draft' : 'Student not graded yet'}
+                              />
+                            </td>
                           </tr>
                         );
                       })}
                     </tbody>
                   </table>
-                </div>
-              </div>
-
-              <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6 mb-6">
-                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-4">
-                  <div>
-                    <h2 className="text-lg font-semibold text-pacifica-navy">Choose Students for Email Drafts</h2>
-                    <p className="text-sm text-pacifica-slate">Only graded students can receive an email draft.</p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={selectAllEmailRecipients}
-                      className="btn btn-outline"
-                      disabled={students.filter(s => grades[s.id]?.completed).length === 0}
-                    >
-                      Select All Graded
-                    </button>
-                    <button
-                      type="button"
-                      onClick={clearEmailRecipients}
-                      className="btn btn-outline"
-                      disabled={selectedEmailStudentIds.length === 0}
-                    >
-                      Clear Selection
-                    </button>
-                  </div>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                  {students.map(student => {
-                    const gradeRecord = grades[student.id] || {};
-                    const graded = !!gradeRecord.completed;
-                    const totalScore = graded
-                      ? rubricItems.reduce((sum, item) => sum + (gradeRecord.scores?.[item.name] || 0), 0)
-                      : null;
-                    const checked = graded && selectedEmailStudentIds.includes(student.id);
-                    return (
-                      <label
-                        key={student.id}
-                        className={`flex items-center justify-between gap-3 border rounded-lg px-4 py-3 transition ${graded
-                          ? checked
-                            ? 'border-pacifica-orange bg-pacifica-orange/10 shadow-sm'
-                            : 'border-pacifica-gray hover:border-pacifica-orange hover:bg-pacifica-orange/10'
-                          : 'border-pacifica-gray bg-gray-50 opacity-60 cursor-not-allowed'
-                          }`}
-                      >
-                        <div className="min-w-0">
-                          <p className="font-semibold text-pacifica-navy truncate">{student.name}</p>
-                          <p className="text-xs text-pacifica-slate truncate">
-                            {graded
-                              ? `Graded • ${totalScore}/${maxTotal}`
-                              : 'Not graded yet'}
-                          </p>
-                        </div>
-                        <input
-                          type="checkbox"
-                          className="w-5 h-5 text-pacifica-orange rounded"
-                          disabled={!graded}
-                          checked={checked}
-                          onChange={() => handleEmailRecipientToggle(student.id)}
-                        />
-                      </label>
-                    );
-                  })}
                 </div>
               </div>
 
