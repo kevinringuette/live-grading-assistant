@@ -1668,6 +1668,9 @@
 
           setStudents(allStudents);
           setStudentOrder(allStudents.map(s => s.id));
+          if (allStudents.length > 0) {
+            setCurrentGradingStudentId(allStudents[0].id);
+          }
 
           // Initialize grades for all students
           const initialGrades = {};
