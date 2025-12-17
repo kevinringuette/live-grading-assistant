@@ -1551,13 +1551,31 @@
       const selectPastAssignmentAndGrade = async (assignment) => {
         if (!assignment) return;
 
-        setLoading(true);
+        // Check if sections are loaded
+        if (!sections || sections.length === 0) {
+          setError('No sections available. Please wait for sections to load.');
+          return;
+        }
+
+        // Don't use shared loading state - it causes UI issues
+        // Instead, show a specific loading message
         setError(null);
 
         try {
+          console.log('[selectPastAssignmentAndGrade] Starting with assignment:', assignment.name);
+
           // Set assignment name and rubric items
-          setAssignmentName(assignment.name || '');
+          const assignmentName = assignment.name || '';
           const safeItems = Array.isArray(assignment.items) ? assignment.items : normalizeRubricItems(assignment.items);
+
+          console.log('[selectPastAssignmentAndGrade] Rubric items:', safeItems.length);
+
+          if (safeItems.length === 0) {
+            setError('This assignment has no rubric items. Please select a different assignment.');
+            return;
+          }
+
+          setAssignmentName(assignmentName);
           setRubricItems(safeItems);
           setAssignmentRecordId(assignment.id);
           setContinuingAssignment(true);
@@ -1577,29 +1595,41 @@
 
           // Select all available sections for this teacher
           setSelectedSections(sections);
+          console.log('[selectPastAssignmentAndGrade] Selected sections:', sections.length);
 
           // Load all students from the sections
           const allStudents = [];
           const studentIdsSeen = new Set();
 
           for (const section of sections) {
-            const sectionData = await airtableRequest(`${CONFIG.TABLES.SECTIONS}/${section.id}`);
-            const studentIds = sectionData.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER] || [];
+            try {
+              const sectionData = await airtableRequest(`${CONFIG.TABLES.SECTIONS}/${section.id}`);
+              const studentIds = sectionData.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER] || [];
 
-            for (const studentId of studentIds) {
-              if (!studentIdsSeen.has(studentId)) {
-                studentIdsSeen.add(studentId);
-                const studentData = await airtableRequest(`${CONFIG.TABLES.STUDENTS}/${studentId}`);
-                allStudents.push({
-                  id: studentData.id,
-                  name: studentData.fields[CONFIG.FIELDS.STUDENTS.NAME],
-                  email: studentData.fields[CONFIG.FIELDS.STUDENTS.EMAIL],
-                  studentId: studentData.fields[CONFIG.FIELDS.STUDENTS.ID]?.toString() || 'N/A',
-                  sectionId: section.id,
-                  sectionName: section.name
-                });
+              for (const studentId of studentIds) {
+                if (!studentIdsSeen.has(studentId)) {
+                  studentIdsSeen.add(studentId);
+                  const studentData = await airtableRequest(`${CONFIG.TABLES.STUDENTS}/${studentId}`);
+                  allStudents.push({
+                    id: studentData.id,
+                    name: studentData.fields[CONFIG.FIELDS.STUDENTS.NAME],
+                    email: studentData.fields[CONFIG.FIELDS.STUDENTS.EMAIL],
+                    studentId: studentData.fields[CONFIG.FIELDS.STUDENTS.ID]?.toString() || 'N/A',
+                    sectionId: section.id,
+                    sectionName: section.name
+                  });
+                }
               }
+            } catch (sectionErr) {
+              console.error('[selectPastAssignmentAndGrade] Error loading section:', section.id, sectionErr);
             }
+          }
+
+          console.log('[selectPastAssignmentAndGrade] Loaded students:', allStudents.length);
+
+          if (allStudents.length === 0) {
+            setError('No students found in the selected sections.');
+            return;
           }
 
           setStudents(allStudents);
@@ -1612,13 +1642,13 @@
           });
           setGrades(initialGrades);
 
+          console.log('[selectPastAssignmentAndGrade] Going to grading step');
+
           // Go directly to grading
           setStep('grading');
         } catch (err) {
-          console.error('Error loading past assignment:', err);
-          setError('Failed to load past assignment. Please try again.');
-        } finally {
-          setLoading(false);
+          console.error('[selectPastAssignmentAndGrade] Error:', err);
+          setError(`Failed to load past assignment: ${err.message || 'Unknown error'}`);
         }
       };
 
@@ -3438,10 +3468,10 @@
                   Sections: {selectedSections.map(s => s.name).join(', ')} ({students.length} students)
                 </p>
 
-                {/* Past Assignment Picker - moved above Assignment Name */}
+                {/* Past Rubric Picker */}
                 <div className="mb-6">
                   <label className="block text-sm font-medium text-pacifica-navy mb-2">
-                    Load from Past Assignment
+                    Load Rubric from Past Assignment
                   </label>
                   <button
                     onClick={() => {
@@ -3455,30 +3485,30 @@
                       {voiceGraderAssignmentsLoading ? (
                         <>
                           <div className="animate-spin rounded-full h-4 w-4 border-2 border-pacifica-navy border-t-transparent"></div>
-                          Loading assignments...
+                          Loading rubrics...
                         </>
                       ) : selectedVoiceAssignmentId ? (
-                        voiceGraderAssignments.find(a => a.id === selectedVoiceAssignmentId)?.name || 'Select Past Assignment'
+                        voiceGraderAssignments.find(a => a.id === selectedVoiceAssignmentId)?.name || 'Select Past Rubric'
                       ) : (
-                        'Select Past Assignment'
+                        'Select Past Rubric'
                       )}
                     </span>
                     {!voiceGraderAssignmentsLoading && <Icon name="ChevronRight" className="w-5 h-5 text-pacifica-navy" />}
                   </button>
                   {!voiceGraderAssignmentsLoading && voiceGraderAssignments.length === 0 && (
                     <p className="text-xs text-pacifica-slate mt-2">
-                      No past assignments found. Create a new one below.
+                      No past rubrics found. Create a new one below.
                     </p>
                   )}
                 </div>
 
-                {/* Assignment Picker Modal */}
+                {/* Rubric Picker Modal */}
                 {showAssignmentPicker && (
                   <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
                     <div className="bg-white rounded-lg shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col">
                       <div className="p-4 border-b border-pacifica-gray">
                         <div className="flex items-center justify-between mb-3">
-                          <h3 className="text-lg font-bold text-pacifica-navy">Select Past Assignment</h3>
+                          <h3 className="text-lg font-bold text-pacifica-navy">Select Past Rubric</h3>
                           <button
                             onClick={() => setShowAssignmentPicker(false)}
                             className="p-1 hover:bg-pacifica-gray rounded-full transition-colors"

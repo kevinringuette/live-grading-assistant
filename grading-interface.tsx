@@ -1,3 +1,10 @@
+// ============================================================================
+// NOTE: THIS FILE IS NOT USED AT RUNTIME
+// The production code is in index.html which has all React code inline.
+// This file is kept as a development reference only.
+// All changes should be made to index.html instead.
+// ============================================================================
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { Mic, Square, Settings, Upload, Download, Plus, Trash2, ArrowLeft, ArrowRight, ChevronRight, Check } from 'lucide-react';
 
