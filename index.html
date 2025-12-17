@@ -3445,62 +3445,27 @@
                       <p className="text-sm font-semibold text-pacifica-navy">Continue a previous assignment</p>
                       <p className="text-xs text-pacifica-slate">Load rubric and go directly to grading.</p>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={loadVoiceGraderAssignments}
-                        className="text-sm text-pacifica-orange hover:text-pacifica-tangerine font-medium flex items-center gap-1"
-                      >
-                        <Icon name="RefreshCw" className="w-3 h-3" /> Refresh
-                      </button>
-                      <button
-                        onClick={() => setShowTeacherAssignments(prev => !prev)}
-                        disabled={voiceGraderAssignmentsLoading || teacherAssignments.length === 0}
-                        className="text-sm px-3 py-1 rounded-md border border-pacifica-navy text-pacifica-navy hover:bg-pacifica-navy hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {showTeacherAssignments
-                          ? 'Hide Past Assignments'
-                          : (teacherAssignments.length > 0
-                            ? `Show ${teacherAssignments.length} Past Assignments`
-                            : 'No Past Assignments')}
-                      </button>
-                    </div>
+                    <button
+                      onClick={() => {
+                        loadVoiceGraderAssignments();
+                        setShowTeacherAssignments(true);
+                      }}
+                      disabled={voiceGraderAssignmentsLoading || teacherAssignments.length === 0}
+                      className="text-sm px-3 py-1 rounded-md border border-pacifica-navy text-pacifica-navy hover:bg-pacifica-navy hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {voiceGraderAssignmentsLoading
+                        ? 'Loading...'
+                        : (teacherAssignments.length > 0
+                          ? `View ${teacherAssignments.length} Past Assignments`
+                          : 'No Past Assignments')}
+                    </button>
                   </div>
 
-                  {voiceGraderAssignmentsLoading ? (
-                    <div className="flex items-center gap-2 text-pacifica-slate text-sm py-2">
-                      <div className="animate-spin rounded-full h-4 w-4 border-2 border-pacifica-navy border-t-transparent"></div>
-                      Loading assignments...
-                    </div>
-                  ) : !showTeacherAssignments ? (
-                    <p className="text-sm text-pacifica-slate py-2">
-                      {teacherAssignments.length === 0
-                        ? 'No existing assignments found for this teacher yet.'
-                        : 'Click "Show Past Assignments" to view previous work by this teacher.'}
-                    </p>
-                  ) : teacherAssignments.length === 0 ? (
-                    <p className="text-sm text-pacifica-slate py-2">No existing assignments found for this teacher yet.</p>
-                  ) : (
-                    <div className="space-y-2 max-h-48 overflow-y-auto">
-                      {teacherAssignments.map(assignment => (
-                        <div key={assignment.id} className="flex items-center justify-between gap-2 bg-white border border-pacifica-gray rounded-md p-3">
-                          <div className="min-w-0 flex-1">
-                            <p className="text-sm font-semibold text-pacifica-navy truncate">{assignment.name || 'Untitled assignment'}</p>
-                            <p className="text-xs text-pacifica-slate">
-                              {assignment.items?.length || 0} rubric item{(assignment.items?.length || 0) === 1 ? '' : 's'}
-                              {assignment.sectionIds?.length > 0 && ` • ${assignment.sectionIds.length} section${assignment.sectionIds.length === 1 ? '' : 's'}`}
-                              {assignment.teacherName && ` • ${assignment.teacherName}`}
-                            </p>
-                          </div>
-                          <button
-                            onClick={() => selectPastAssignmentAndGrade(assignment)}
-                            className="flex-shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-sm bg-pacifica-orange text-white rounded-md hover:bg-pacifica-tangerine transition-colors"
-                          >
-                            <Icon name="ArrowRight" className="w-4 h-4" /> Grade Now
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  <p className="text-sm text-pacifica-slate py-2">
+                    {teacherAssignments.length === 0
+                      ? 'No existing assignments found for this teacher yet.'
+                      : 'Click the button to view and select a past assignment.'}
+                  </p>
                 </div>
 
                 <div className="border-t border-pacifica-gray pt-4 mb-4">
@@ -3669,6 +3634,68 @@
                           (a.teacherName && a.teacherName.toLowerCase().includes(assignmentPickerQuery.toLowerCase()))
                         ).length === 0 && (
                           <p className="text-center text-pacifica-slate py-4">No assignments found</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Past Assignments Modal */}
+                {showTeacherAssignments && (
+                  <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-lg shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col">
+                      <div className="p-4 border-b border-pacifica-gray flex items-center justify-between">
+                        <div>
+                          <h3 className="text-lg font-bold text-pacifica-navy">Past Assignments</h3>
+                          <p className="text-sm text-pacifica-slate">
+                            {selectedTeacher?.name ? `For ${selectedTeacher.name}` : 'Select a teacher to view assignments'}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={loadVoiceGraderAssignments}
+                            className="text-sm text-pacifica-orange hover:text-pacifica-tangerine font-medium flex items-center gap-1"
+                          >
+                            <Icon name="RefreshCw" className="w-4 h-4" /> Refresh
+                          </button>
+                          <button
+                            onClick={() => setShowTeacherAssignments(false)}
+                            className="p-2 rounded-full hover:bg-pacifica-gray transition-colors"
+                          >
+                            <Icon name="X" className="w-5 h-5 text-pacifica-slate" />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="flex-1 overflow-y-auto p-4 space-y-2">
+                        {voiceGraderAssignmentsLoading ? (
+                          <div className="flex items-center gap-2 text-pacifica-slate text-sm py-2">
+                            <div className="animate-spin rounded-full h-4 w-4 border-2 border-pacifica-navy border-t-transparent"></div>
+                            Loading assignments...
+                          </div>
+                        ) : teacherAssignments.length === 0 ? (
+                          <p className="text-sm text-pacifica-slate py-2">No existing assignments found for this teacher yet.</p>
+                        ) : (
+                          teacherAssignments.map(assignment => (
+                            <div key={assignment.id} className="flex items-center justify-between gap-2 bg-white border border-pacifica-gray rounded-md p-3">
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm font-semibold text-pacifica-navy truncate">{assignment.name || 'Untitled assignment'}</p>
+                                <p className="text-xs text-pacifica-slate">
+                                  {assignment.items?.length || 0} rubric item{(assignment.items?.length || 0) === 1 ? '' : 's'}
+                                  {assignment.sectionIds?.length > 0 && ` • ${assignment.sectionIds.length} section${assignment.sectionIds.length === 1 ? '' : 's'}`}
+                                  {assignment.teacherName && ` • ${assignment.teacherName}`}
+                                </p>
+                              </div>
+                              <button
+                                onClick={() => {
+                                  setShowTeacherAssignments(false);
+                                  selectPastAssignmentAndGrade(assignment);
+                                }}
+                                className="flex-shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-sm bg-pacifica-orange text-white rounded-md hover:bg-pacifica-tangerine transition-colors"
+                              >
+                                <Icon name="ArrowRight" className="w-4 h-4" /> Grade Now
+                              </button>
+                            </div>
+                          ))
                         )}
                       </div>
                     </div>
