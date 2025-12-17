@@ -702,6 +702,9 @@
       const [voiceGraderAssignments, setVoiceGraderAssignments] = useState([]);
       const [voiceGraderAssignmentsLoading, setVoiceGraderAssignmentsLoading] = useState(false);
       const [selectedVoiceAssignmentId, setSelectedVoiceAssignmentId] = useState('');
+      // Loading state for past assignment grading
+      const [pastAssignmentLoading, setPastAssignmentLoading] = useState(false);
+      const [pastAssignmentLoadingStatus, setPastAssignmentLoadingStatus] = useState('');
       const [rubricItems, setRubricItems] = useState([
         { name: 'Correctness', maxPoints: 25 },
         { name: 'Method', maxPoints: 25 },
@@ -1497,12 +1500,17 @@
               }
             }
 
+            // Get section IDs from the Voice Grader record
+            const sectionIdsRaw = record.fields['Master Sections'] || record.fields['Sections'] || [];
+            const sectionIds = Array.isArray(sectionIdsRaw) ? sectionIdsRaw.filter(Boolean) : [];
+
             return {
               id: record.id,
               name: record.fields[CONFIG.FIELDS.VOICE_GRADER.ASSIGNMENT_NAME],
               items: normalizeRubricItems(record.fields[CONFIG.FIELDS.VOICE_GRADER.RUBRIC]),
               rubricRecordIds,
-              teacherName
+              teacherName,
+              sectionIds
             };
           }));
 
@@ -1557,25 +1565,27 @@
           return;
         }
 
-        // Don't use shared loading state - it causes UI issues
-        // Instead, show a specific loading message
         setError(null);
+        setPastAssignmentLoading(true);
+        setPastAssignmentLoadingStatus('Preparing assignment...');
 
         try {
           console.log('[selectPastAssignmentAndGrade] Starting with assignment:', assignment.name);
+          console.log('[selectPastAssignmentAndGrade] Assignment sectionIds:', assignment.sectionIds);
 
           // Set assignment name and rubric items
-          const assignmentName = assignment.name || '';
+          const assignmentNameVal = assignment.name || '';
           const safeItems = Array.isArray(assignment.items) ? assignment.items : normalizeRubricItems(assignment.items);
 
           console.log('[selectPastAssignmentAndGrade] Rubric items:', safeItems.length);
 
           if (safeItems.length === 0) {
+            setPastAssignmentLoading(false);
             setError('This assignment has no rubric items. Please select a different assignment.');
             return;
           }
 
-          setAssignmentName(assignmentName);
+          setAssignmentName(assignmentNameVal);
           setRubricItems(safeItems);
           setAssignmentRecordId(assignment.id);
           setContinuingAssignment(true);
@@ -1593,15 +1603,32 @@
             setRubricItemIds(nextMap);
           }
 
-          // Select all available sections for this teacher
-          setSelectedSections(sections);
-          console.log('[selectPastAssignmentAndGrade] Selected sections:', sections.length);
+          // Determine which sections to use - prefer assignment's sections, fall back to all
+          let sectionsToUse = sections;
+          if (assignment.sectionIds && assignment.sectionIds.length > 0) {
+            // Filter to only sections that match the assignment's sectionIds
+            const matchingSections = sections.filter(s => assignment.sectionIds.includes(s.id));
+            if (matchingSections.length > 0) {
+              sectionsToUse = matchingSections;
+              console.log('[selectPastAssignmentAndGrade] Using assignment sections:', matchingSections.map(s => s.name).join(', '));
+            } else {
+              console.log('[selectPastAssignmentAndGrade] No matching sections found, using all sections');
+            }
+          } else {
+            console.log('[selectPastAssignmentAndGrade] No sectionIds in assignment, using all sections');
+          }
+
+          setSelectedSections(sectionsToUse);
+          setPastAssignmentLoadingStatus(`Loading ${sectionsToUse.length} section${sectionsToUse.length !== 1 ? 's' : ''}: ${sectionsToUse.map(s => s.name).join(', ')}`);
 
           // Load all students from the sections
           const allStudents = [];
           const studentIdsSeen = new Set();
 
-          for (const section of sections) {
+          for (let i = 0; i < sectionsToUse.length; i++) {
+            const section = sectionsToUse[i];
+            setPastAssignmentLoadingStatus(`Loading section ${i + 1}/${sectionsToUse.length}: ${section.name}...`);
+
             try {
               const sectionData = await airtableRequest(`${CONFIG.TABLES.SECTIONS}/${section.id}`);
               const studentIds = sectionData.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER] || [];
@@ -1626,8 +1653,10 @@
           }
 
           console.log('[selectPastAssignmentAndGrade] Loaded students:', allStudents.length);
+          setPastAssignmentLoadingStatus(`Loaded ${allStudents.length} students. Preparing grading interface...`);
 
           if (allStudents.length === 0) {
+            setPastAssignmentLoading(false);
             setError('No students found in the selected sections.');
             return;
           }
@@ -1645,9 +1674,11 @@
           console.log('[selectPastAssignmentAndGrade] Going to grading step');
 
           // Go directly to grading
+          setPastAssignmentLoading(false);
           setStep('grading');
         } catch (err) {
           console.error('[selectPastAssignmentAndGrade] Error:', err);
+          setPastAssignmentLoading(false);
           setError(`Failed to load past assignment: ${err.message || 'Unknown error'}`);
         }
       };
@@ -3323,6 +3354,19 @@
       }
 
       if (step === 'section-select') {
+        // Show loading screen while loading past assignment
+        if (pastAssignmentLoading) {
+          return (
+            <div className="min-h-screen bg-gradient-to-br from-pacifica-navy to-pacifica-midnight p-8 flex items-center justify-center">
+              <div className="bg-white rounded-lg shadow-xl p-8 max-w-md w-full text-center">
+                <div className="animate-spin rounded-full h-16 w-16 border-4 border-pacifica-orange border-t-transparent mx-auto mb-6"></div>
+                <h2 className="text-xl font-bold text-pacifica-navy mb-2">Loading Assignment</h2>
+                <p className="text-pacifica-slate text-sm">{pastAssignmentLoadingStatus}</p>
+              </div>
+            </div>
+          );
+        }
+
         return (
           <div className="min-h-screen bg-gradient-to-br from-pacifica-navy to-pacifica-midnight p-8">
             <div className="max-w-2xl mx-auto">
@@ -3375,6 +3419,7 @@
                             <p className="text-sm font-semibold text-pacifica-navy truncate">{assignment.name || 'Untitled assignment'}</p>
                             <p className="text-xs text-pacifica-slate">
                               {assignment.items?.length || 0} rubric item{(assignment.items?.length || 0) === 1 ? '' : 's'}
+                              {assignment.sectionIds?.length > 0 && ` • ${assignment.sectionIds.length} section${assignment.sectionIds.length === 1 ? '' : 's'}`}
                               {assignment.teacherName && ` • ${assignment.teacherName}`}
                             </p>
                           </div>
