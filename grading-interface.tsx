@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Mic, Square, Settings, Upload, Download, Plus, Trash2, ArrowLeft, ArrowRight, ChevronRight } from 'lucide-react';
+import { Mic, Square, Settings, Upload, Download, Plus, Trash2, ArrowLeft, ArrowRight, ChevronRight, Check } from 'lucide-react';
 
 // ============================================================================
 // CONFIGURATION - UPDATE THESE VALUES
@@ -219,6 +219,7 @@ export default function GradingInterface() {
   const [sessionId, setSessionId] = useState(null);
   const [activeAssignmentId, setActiveAssignmentId] = useState<string | null>(null);
   const [gradeRecordIds, setGradeRecordIds] = useState<Record<string, string>>({});
+  const [selectedStudentsForEmail, setSelectedStudentsForEmail] = useState<Record<string, boolean>>({});
   const teacherRubricOptions = useMemo(() => {
     // Only show rubrics that belong to the currently selected teacher; do not fall back to all teachers
     const source = selectedTeacher ? savedRubrics : allRubrics;
@@ -1264,6 +1265,25 @@ export default function GradingInterface() {
     }));
   };
 
+  const toggleStudentSelection = (studentId: string) => {
+    setSelectedStudentsForEmail(prev => ({
+      ...prev,
+      [studentId]: !prev[studentId]
+    }));
+  };
+
+  const selectedCount = Object.values(selectedStudentsForEmail).filter(Boolean).length;
+
+  const toggleAllStudents = () => {
+    if (selectedCount === students.length) {
+      setSelectedStudentsForEmail({});
+    } else {
+      const allSelected: Record<string, boolean> = {};
+      students.forEach(s => { allSelected[s.id] = true; });
+      setSelectedStudentsForEmail(allSelected);
+    }
+  };
+
   // ============================================================================
   // RENDER FUNCTIONS
   // ============================================================================
@@ -1793,6 +1813,12 @@ export default function GradingInterface() {
                 <h2 className="text-lg font-semibold text-gray-900">
                   Student Progress ({Object.values(grades).filter(g => g.completed).length}/{students.length})
                 </h2>
+                <button
+                  onClick={toggleAllStudents}
+                  className="px-3 py-1 text-xs font-medium text-blue-600 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100 transition-colors"
+                >
+                  {selectedCount === students.length ? 'Deselect All' : 'Select All'}
+                </button>
               </div>
 
               <div className="space-y-3">
@@ -1811,18 +1837,19 @@ export default function GradingInterface() {
                   const total = calculateTotal(studentGrades);
                   const colorOptions = ['bg-blue-100 text-blue-600', 'bg-green-100 text-green-600', 'bg-purple-100 text-purple-600', 'bg-orange-100 text-orange-600'];
                   const colorClass = colorOptions[students.indexOf(student) % 4];
+                  const isSelected = selectedStudentsForEmail[student.id] || false;
 
                   return (
-                    <div 
-                      key={student.id} 
-                      className={`border rounded-lg p-4 transition-all ${
-                        currentStudent === student.name 
-                          ? 'border-blue-500 bg-blue-50 shadow-md' 
-                          : studentGrades.completed 
-                            ? 'border-green-300 bg-green-50'
-                            : 'border-gray-200 hover:border-blue-300'
-                      }`}
-                    >
+                    <div key={student.id} className="flex items-stretch gap-2">
+                      <div
+                        className={`flex-1 border rounded-lg p-4 transition-all ${
+                          currentStudent === student.name
+                            ? 'border-blue-500 bg-blue-50 shadow-md'
+                            : studentGrades.completed
+                              ? 'border-green-300 bg-green-50'
+                              : 'border-gray-200 hover:border-blue-300'
+                        }`}
+                      >
                       <div className="flex items-start justify-between mb-3">
                         <div className="flex items-center gap-3">
                           <div className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold ${colorClass}`}>
@@ -1937,6 +1964,18 @@ export default function GradingInterface() {
                             {studentGrades.comments || 'Click to add comments...'}
                           </p>
                         )}
+                      </div>
+                      </div>
+                      <div
+                        className="w-12 flex items-center justify-center cursor-pointer rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 transition-colors"
+                        onClick={() => toggleStudentSelection(student.id)}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleStudentSelection(student.id)}
+                          className="w-5 h-5 cursor-pointer accent-blue-500"
+                        />
                       </div>
                     </div>
                   );
