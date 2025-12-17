@@ -1547,6 +1547,81 @@
         }
       };
 
+      // Select a past assignment from section-select screen and go directly to grading
+      const selectPastAssignmentAndGrade = async (assignment) => {
+        if (!assignment) return;
+
+        setLoading(true);
+        setError(null);
+
+        try {
+          // Set assignment name and rubric items
+          setAssignmentName(assignment.name || '');
+          const safeItems = Array.isArray(assignment.items) ? assignment.items : normalizeRubricItems(assignment.items);
+          setRubricItems(safeItems);
+          setAssignmentRecordId(assignment.id);
+          setContinuingAssignment(true);
+          setSelectedVoiceAssignmentId(assignment.id);
+
+          // Set up rubric item IDs if available
+          if (Array.isArray(assignment.rubricRecordIds) && assignment.rubricRecordIds.length === safeItems.length) {
+            const nextMap = {};
+            assignment.rubricRecordIds.forEach((rid, idx) => {
+              const rubricName = safeItems[idx]?.name;
+              if (rubricName && rid) {
+                nextMap[rubricName] = rid;
+              }
+            });
+            setRubricItemIds(nextMap);
+          }
+
+          // Select all available sections for this teacher
+          setSelectedSections(sections);
+
+          // Load all students from the sections
+          const allStudents = [];
+          const studentIdsSeen = new Set();
+
+          for (const section of sections) {
+            const sectionData = await airtableRequest(`${CONFIG.TABLES.SECTIONS}/${section.id}`);
+            const studentIds = sectionData.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER] || [];
+
+            for (const studentId of studentIds) {
+              if (!studentIdsSeen.has(studentId)) {
+                studentIdsSeen.add(studentId);
+                const studentData = await airtableRequest(`${CONFIG.TABLES.STUDENTS}/${studentId}`);
+                allStudents.push({
+                  id: studentData.id,
+                  name: studentData.fields[CONFIG.FIELDS.STUDENTS.NAME],
+                  email: studentData.fields[CONFIG.FIELDS.STUDENTS.EMAIL],
+                  studentId: studentData.fields[CONFIG.FIELDS.STUDENTS.ID]?.toString() || 'N/A',
+                  sectionId: section.id,
+                  sectionName: section.name
+                });
+              }
+            }
+          }
+
+          setStudents(allStudents);
+          setStudentOrder(allStudents.map(s => s.id));
+
+          // Initialize grades for all students
+          const initialGrades = {};
+          allStudents.forEach(student => {
+            initialGrades[student.id] = { scores: {}, comments: '', completed: false };
+          });
+          setGrades(initialGrades);
+
+          // Go directly to grading
+          setStep('grading');
+        } catch (err) {
+          console.error('Error loading past assignment:', err);
+          setError('Failed to load past assignment. Please try again.');
+        } finally {
+          setLoading(false);
+        }
+      };
+
       const micSupported = !!(navigator?.mediaDevices?.getUserMedia && window.MediaRecorder);
 
       useEffect(() => {
@@ -3238,12 +3313,58 @@
                   Back to Teachers
                 </button>
                 <h1 className="text-3xl font-bold text-pacifica-navy mb-2">Select Sections</h1>
-                <p className="text-pacifica-slate mb-2">Teacher: {selectedTeacher?.name}</p>
-                <p className="text-sm text-pacifica-orange mb-6 font-medium">
-                  {selectedSections.length > 0
-                    ? `${selectedSections.length} section(s) selected`
-                    : 'Select one or more sections to grade'}
-                </p>
+                <p className="text-pacifica-slate mb-6">Teacher: {selectedTeacher?.name}</p>
+
+                {/* Past Assignments Section */}
+                <div className="mb-6 p-4 bg-pacifica-navy/5 rounded-lg border border-pacifica-navy/20">
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <p className="text-sm font-semibold text-pacifica-navy">Continue a previous assignment</p>
+                      <p className="text-xs text-pacifica-slate">Load rubric and go directly to grading.</p>
+                    </div>
+                    <button
+                      onClick={loadVoiceGraderAssignments}
+                      className="text-sm text-pacifica-orange hover:text-pacifica-tangerine font-medium flex items-center gap-1"
+                    >
+                      <Icon name="RefreshCw" className="w-3 h-3" /> Refresh
+                    </button>
+                  </div>
+
+                  {voiceGraderAssignmentsLoading ? (
+                    <div className="flex items-center gap-2 text-pacifica-slate text-sm py-2">
+                      <div className="animate-spin rounded-full h-4 w-4 border-2 border-pacifica-navy border-t-transparent"></div>
+                      Loading assignments...
+                    </div>
+                  ) : voiceGraderAssignments.length === 0 ? (
+                    <p className="text-sm text-pacifica-slate py-2">No existing assignments found for this teacher yet.</p>
+                  ) : (
+                    <div className="space-y-2 max-h-48 overflow-y-auto">
+                      {voiceGraderAssignments.map(assignment => (
+                        <div key={assignment.id} className="flex items-center justify-between gap-2 bg-white border border-pacifica-gray rounded-md p-3">
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-semibold text-pacifica-navy truncate">{assignment.name || 'Untitled assignment'}</p>
+                            <p className="text-xs text-pacifica-slate">
+                              {assignment.items?.length || 0} rubric item{(assignment.items?.length || 0) === 1 ? '' : 's'}
+                              {assignment.teacherName && ` • ${assignment.teacherName}`}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => selectPastAssignmentAndGrade(assignment)}
+                            className="flex-shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-sm bg-pacifica-orange text-white rounded-md hover:bg-pacifica-tangerine transition-colors"
+                          >
+                            <Icon name="ArrowRight" className="w-4 h-4" /> Grade Now
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="border-t border-pacifica-gray pt-4 mb-4">
+                  <p className="text-sm font-semibold text-pacifica-navy mb-1">Or start a new assignment</p>
+                  <p className="text-xs text-pacifica-slate">Select sections to create a new assignment.</p>
+                </div>
+
                 {loading ? (
                   <div className="text-center py-8">
                     <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-pacifica-navy mx-auto mb-4"></div>
