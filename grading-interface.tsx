@@ -219,7 +219,7 @@ export default function GradingInterface() {
   const [sessionId, setSessionId] = useState(null);
   const [activeAssignmentId, setActiveAssignmentId] = useState<string | null>(null);
   const [gradeRecordIds, setGradeRecordIds] = useState<Record<string, string>>({});
-  const [selectedStudentsForEmail, setSelectedStudentsForEmail] = useState<Set<string>>(new Set());
+  const [selectedStudentsForEmail, setSelectedStudentsForEmail] = useState<Record<string, boolean>>({});
   const teacherRubricOptions = useMemo(() => {
     // Only show rubrics that belong to the currently selected teacher; do not fall back to all teachers
     const source = selectedTeacher ? savedRubrics : allRubrics;
@@ -1266,22 +1266,21 @@ export default function GradingInterface() {
   };
 
   const toggleStudentSelection = (studentId: string) => {
-    setSelectedStudentsForEmail(prev => {
-      const next = new Set(prev);
-      if (next.has(studentId)) {
-        next.delete(studentId);
-      } else {
-        next.add(studentId);
-      }
-      return next;
-    });
+    setSelectedStudentsForEmail(prev => ({
+      ...prev,
+      [studentId]: !prev[studentId]
+    }));
   };
 
+  const selectedCount = Object.values(selectedStudentsForEmail).filter(Boolean).length;
+
   const toggleAllStudents = () => {
-    if (selectedStudentsForEmail.size === students.length) {
-      setSelectedStudentsForEmail(new Set());
+    if (selectedCount === students.length) {
+      setSelectedStudentsForEmail({});
     } else {
-      setSelectedStudentsForEmail(new Set(students.map(s => s.id)));
+      const allSelected: Record<string, boolean> = {};
+      students.forEach(s => { allSelected[s.id] = true; });
+      setSelectedStudentsForEmail(allSelected);
     }
   };
 
@@ -1818,7 +1817,7 @@ export default function GradingInterface() {
                   onClick={toggleAllStudents}
                   className="px-3 py-1 text-xs font-medium text-blue-600 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100 transition-colors"
                 >
-                  {selectedStudentsForEmail.size === students.length ? 'Deselect All' : 'Select All'}
+                  {selectedCount === students.length ? 'Deselect All' : 'Select All'}
                 </button>
               </div>
 
@@ -1838,10 +1837,10 @@ export default function GradingInterface() {
                   const total = calculateTotal(studentGrades);
                   const colorOptions = ['bg-blue-100 text-blue-600', 'bg-green-100 text-green-600', 'bg-purple-100 text-purple-600', 'bg-orange-100 text-orange-600'];
                   const colorClass = colorOptions[students.indexOf(student) % 4];
-                  const isSelected = selectedStudentsForEmail.has(student.id);
+                  const isSelected = selectedStudentsForEmail[student.id] || false;
 
                   return (
-                    <div key={student.id} className="flex gap-2">
+                    <div key={student.id} className="flex items-stretch gap-2">
                       <div
                         className={`flex-1 border rounded-lg p-4 transition-all ${
                           currentStudent === student.name
@@ -1968,18 +1967,15 @@ export default function GradingInterface() {
                       </div>
                       </div>
                       <div
-                        className="w-10 flex items-center justify-center cursor-pointer"
+                        className="w-12 flex items-center justify-center cursor-pointer rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 transition-colors"
                         onClick={() => toggleStudentSelection(student.id)}
                       >
-                        <div className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-colors ${
-                          isSelected
-                            ? 'bg-blue-500 border-blue-500'
-                            : 'border-gray-300 hover:border-blue-400'
-                        }`}>
-                          {isSelected && (
-                            <Check className="w-3 h-3 text-white" />
-                          )}
-                        </div>
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleStudentSelection(student.id)}
+                          className="w-5 h-5 cursor-pointer accent-blue-500"
+                        />
                       </div>
                     </div>
                   );
