@@ -1497,12 +1497,16 @@
               }
             }
 
+            // Get section IDs
+            const sectionIds = record.fields[CONFIG.FIELDS.VOICE_GRADER.SECTIONS] || record.fields['Master Sections'] || [];
+
             return {
               id: record.id,
               name: record.fields[CONFIG.FIELDS.VOICE_GRADER.ASSIGNMENT_NAME],
               items: normalizeRubricItems(record.fields[CONFIG.FIELDS.VOICE_GRADER.RUBRIC]),
               rubricRecordIds,
-              teacherName
+              teacherName,
+              sectionIds: Array.isArray(sectionIds) ? sectionIds : []
             };
           }));
 
@@ -1544,6 +1548,114 @@
             });
             setRubricItemIds(nextMap);
           }
+        }
+      };
+
+      const loadAssignmentFromSectionSelect = async (assignmentId) => {
+        const selected = voiceGraderAssignments.find(a => a.id === assignmentId);
+        if (!selected) {
+          alert('Assignment not found');
+          return;
+        }
+
+        setLoading(true);
+        setError(null);
+
+        try {
+          // Get assignment's sections from the selected assignment
+          const assignmentSectionIds = selected.sectionIds || [];
+
+          // Find matching sections from available sections
+          const matchingSections = sections.filter(section => assignmentSectionIds.includes(section.id));
+
+          if (matchingSections.length === 0) {
+            alert('Warning: No sections from this assignment match your current available sections.');
+            setLoading(false);
+            return;
+          }
+
+          // Set selected sections
+          setSelectedSections(matchingSections);
+
+          // Load students for matching sections
+          const allStudents = [];
+          const studentIdsSeen = new Set();
+
+          for (const section of matchingSections) {
+            const sectionData = await airtableRequest(`${CONFIG.TABLES.SECTIONS}/${section.id}`);
+            const studentIds = sectionData.fields[CONFIG.FIELDS.SECTIONS.STUDENT_ROSTER] || [];
+
+            for (const studentId of studentIds) {
+              if (!studentIdsSeen.has(studentId)) {
+                studentIdsSeen.add(studentId);
+                const studentData = await airtableRequest(`${CONFIG.TABLES.STUDENTS}/${studentId}`);
+                allStudents.push({
+                  id: studentData.id,
+                  name: studentData.fields[CONFIG.FIELDS.STUDENTS.NAME],
+                  email: studentData.fields[CONFIG.FIELDS.STUDENTS.EMAIL],
+                  studentId: studentData.fields[CONFIG.FIELDS.STUDENTS.ID]?.toString() || 'N/A',
+                  sectionId: section.id,
+                  sectionName: section.name
+                });
+              }
+            }
+          }
+
+          setStudents(allStudents);
+          setStudentOrder(allStudents.map(s => s.id));
+
+          // Set assignment details
+          setAssignmentName(selected.name || '');
+          const safeItems = Array.isArray(selected.items) ? selected.items : normalizeRubricItems(selected.items);
+          setRubricItems(safeItems);
+          setAssignmentRecordId(selected.id);
+          setContinuingAssignment(true);
+          setSelectedVoiceAssignmentId(assignmentId);
+
+          // Set rubric item IDs if available
+          if (Array.isArray(selected.rubricRecordIds) && selected.rubricRecordIds.length === safeItems.length) {
+            const nextMap = {};
+            selected.rubricRecordIds.forEach((rid, idx) => {
+              const rubricName = safeItems[idx]?.name;
+              if (rubricName && rid) {
+                nextMap[rubricName] = rid;
+              }
+            });
+            setRubricItemIds(nextMap);
+          }
+
+          // Initialize grades (load existing grades if they exist)
+          const initialGrades = {};
+          allStudents.forEach(student => {
+            initialGrades[student.id] = { scores: {}, comments: '', completed: false };
+          });
+          setGrades(initialGrades);
+
+          // Sync sections to Voice Grader table
+          try {
+            await airtableRequest(`${CONFIG.TABLES.VOICE_GRADER}/${selected.id}`, {
+              method: 'PATCH',
+              body: JSON.stringify({
+                fields: {
+                  [CONFIG.FIELDS.Voice_Grader.ASSIGNMENT_NAME]: selected.name,
+                  [CONFIG.FIELDS.Voice_Grader.TEACHER]: [selectedTeacher.id],
+                  [CONFIG.FIELDS.Voice_Grader.RUBRIC]: JSON.stringify(safeItems),
+                  [CONFIG.FIELDS.Voice_Grader.SECTIONS]: matchingSections.map(s => s.id)
+                }
+              })
+            });
+          } catch (err) {
+            console.error('Error syncing Voice Grader record:', err);
+          }
+
+          // Skip assignment-setup and go directly to grading
+          setStep('grading');
+
+        } catch (err) {
+          console.error('Error loading assignment:', err);
+          setError('Failed to load assignment.');
+        } finally {
+          setLoading(false);
         }
       };
 
@@ -3288,14 +3400,104 @@
                         );
                       })}
                     </div>
+
+                    {/* Past Assignment Loading Section */}
+                    <div className="border-t-2 border-pacifica-gray pt-6 mb-6">
+                      <div className="mb-3">
+                        <h3 className="text-sm font-semibold text-pacifica-navy mb-1">Or continue a previous assignment</h3>
+                        <p className="text-xs text-pacifica-slate">Load assignment with sections and grades from Airtable.</p>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setAssignmentPickerQuery('');
+                          setShowAssignmentPicker(true);
+                        }}
+                        disabled={voiceGraderAssignmentsLoading || voiceGraderAssignments.length === 0}
+                        className="w-full px-4 py-3 border-2 border-pacifica-navy rounded-lg hover:bg-pacifica-navy hover:bg-opacity-10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-left flex items-center justify-between"
+                      >
+                        <span className="text-pacifica-navy font-medium flex items-center gap-2">
+                          {voiceGraderAssignmentsLoading ? (
+                            <>
+                              <div className="animate-spin rounded-full h-4 w-4 border-2 border-pacifica-navy border-t-transparent"></div>
+                              Loading assignments...
+                            </>
+                          ) : voiceGraderAssignments.length === 0 ? (
+                            'No past assignments found'
+                          ) : (
+                            'Select Past Assignment'
+                          )}
+                        </span>
+                        {!voiceGraderAssignmentsLoading && voiceGraderAssignments.length > 0 && <Icon name="ChevronRight" className="w-5 h-5 text-pacifica-navy" />}
+                      </button>
+                    </div>
+
                     <button
                       onClick={proceedWithSections}
                       disabled={selectedSections.length === 0}
                       className="w-full px-6 py-3 bg-pacifica-orange text-white font-semibold rounded-lg hover:bg-pacifica-tangerine transition-colors disabled:bg-pacifica-gray disabled:cursor-not-allowed"
                     >
-                      Continue with {selectedSections.length} Section{selectedSections.length !== 1 ? 's' : ''}
+                      Create new assignment with {selectedSections.length} Section{selectedSections.length !== 1 ? 's' : ''}
                     </button>
                   </>
+                )}
+
+                {/* Assignment Picker Modal for Section Select */}
+                {showAssignmentPicker && (
+                  <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-lg shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col">
+                      <div className="p-4 border-b border-pacifica-gray">
+                        <div className="flex items-center justify-between mb-3">
+                          <h3 className="text-lg font-bold text-pacifica-navy">Select Past Assignment</h3>
+                          <button
+                            onClick={() => setShowAssignmentPicker(false)}
+                            className="p-1 hover:bg-pacifica-gray rounded-full transition-colors"
+                          >
+                            <Icon name="X" className="w-5 h-5 text-pacifica-slate" />
+                          </button>
+                        </div>
+                        <input
+                          type="text"
+                          placeholder="Search assignments..."
+                          value={assignmentPickerQuery}
+                          onChange={(e) => setAssignmentPickerQuery(e.target.value)}
+                          className="w-full px-3 py-2 border-2 border-pacifica-gray rounded-lg focus:ring-2 focus:ring-pacifica-orange focus:border-transparent"
+                          autoFocus
+                        />
+                      </div>
+                      <div className="flex-1 overflow-y-auto p-2">
+                        {voiceGraderAssignments
+                          .filter(a =>
+                            a.name.toLowerCase().includes(assignmentPickerQuery.toLowerCase()) ||
+                            (a.teacherName && a.teacherName.toLowerCase().includes(assignmentPickerQuery.toLowerCase()))
+                          )
+                          .map(assignment => (
+                            <button
+                              key={assignment.id}
+                              onClick={() => {
+                                loadAssignmentFromSectionSelect(assignment.id);
+                                setShowAssignmentPicker(false);
+                              }}
+                              className="w-full text-left p-3 rounded-lg mb-1 transition-colors hover:bg-pacifica-gray border-2 border-transparent"
+                            >
+                              <p className="font-semibold text-pacifica-navy">{assignment.name}</p>
+                              <div className="flex gap-3 text-sm text-pacifica-slate">
+                                {assignment.teacherName && <span>{assignment.teacherName}</span>}
+                                <span>• {assignment.items.length} rubric item{assignment.items.length !== 1 ? 's' : ''}</span>
+                                {assignment.sectionIds && assignment.sectionIds.length > 0 && (
+                                  <span>• {assignment.sectionIds.length} section{assignment.sectionIds.length !== 1 ? 's' : ''}</span>
+                                )}
+                              </div>
+                            </button>
+                          ))}
+                        {voiceGraderAssignments.filter(a =>
+                          a.name.toLowerCase().includes(assignmentPickerQuery.toLowerCase()) ||
+                          (a.teacherName && a.teacherName.toLowerCase().includes(assignmentPickerQuery.toLowerCase()))
+                        ).length === 0 && (
+                          <p className="text-center text-pacifica-slate py-4">No assignments found</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 )}
               </div>
             </div>
@@ -3384,7 +3586,11 @@
                             <button
                               key={assignment.id}
                               onClick={() => {
-                                handleVoiceAssignmentSelection(assignment.id);
+                                if (step === 'section-select') {
+                                  loadAssignmentFromSectionSelect(assignment.id);
+                                } else {
+                                  handleVoiceAssignmentSelection(assignment.id);
+                                }
                                 setShowAssignmentPicker(false);
                               }}
                               className={`w-full text-left p-3 rounded-lg mb-1 transition-colors ${
@@ -3396,7 +3602,10 @@
                               <p className="font-semibold text-pacifica-navy">{assignment.name}</p>
                               <div className="flex gap-3 text-sm text-pacifica-slate">
                                 {assignment.teacherName && <span>{assignment.teacherName}</span>}
-                                <span>• {assignment.items.length} rubric items</span>
+                                <span>• {assignment.items.length} rubric item{assignment.items.length !== 1 ? 's' : ''}</span>
+                                {assignment.sectionIds && assignment.sectionIds.length > 0 && (
+                                  <span>• {assignment.sectionIds.length} section{assignment.sectionIds.length !== 1 ? 's' : ''}</span>
+                                )}
                               </div>
                             </button>
                           ))}
