@@ -3641,6 +3641,12 @@
                             {selectedTeacher?.name ? `For ${selectedTeacher.name}` : 'Select a teacher to view assignments'}
                           </p>
                         </div>
+                        {voiceGraderAssignmentsLoading && (
+                          <div className="flex items-center gap-2 text-pacifica-slate text-sm mr-2">
+                            <div className="animate-spin rounded-full h-4 w-4 border-2 border-pacifica-navy border-t-transparent"></div>
+                            Loading...
+                          </div>
+                        )}
                         <button
                           onClick={() => setShowTeacherAssignments(false)}
                           className="p-2 rounded-full hover:bg-pacifica-gray transition-colors"
@@ -3648,13 +3654,16 @@
                           <Icon name="X" className="w-5 h-5 text-pacifica-slate" />
                         </button>
                       </div>
-                      <div className="flex-1 overflow-y-auto p-4 space-y-2">
-                        {voiceGraderAssignmentsLoading ? (
-                          <div className="flex items-center gap-2 text-pacifica-slate text-sm py-2">
-                            <div className="animate-spin rounded-full h-4 w-4 border-2 border-pacifica-navy border-t-transparent"></div>
-                            Loading assignments...
+                      <div className="flex-1 overflow-y-auto p-4 space-y-2 relative">
+                        {voiceGraderAssignmentsLoading && (
+                          <div className="absolute inset-0 bg-white/70 backdrop-blur-sm flex items-center justify-center z-10">
+                            <div className="flex items-center gap-3 text-pacifica-slate text-sm">
+                              <div className="animate-spin rounded-full h-6 w-6 border-3 border-pacifica-navy border-t-transparent"></div>
+                              Loading assignments...
+                            </div>
                           </div>
-                        ) : teacherAssignments.length === 0 ? (
+                        )}
+                        {teacherAssignments.length === 0 ? (
                           <p className="text-sm text-pacifica-slate py-2">No existing assignments found for this teacher yet.</p>
                         ) : (
                           teacherAssignments.map(assignment => (
