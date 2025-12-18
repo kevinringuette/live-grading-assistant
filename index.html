@@ -470,52 +470,65 @@
       fileaudio: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 22h.5c.5 0 1-.2 1.4-.6.4-.4.6-.9.6-1.4V7.5L14.5 2H6c-.5 0-1 .2-1.4.6C4.2 3 4 3.5 4 4v3"/><polyline points="14 2 14 8 20 8"/><path d="M10 20v-1a2 2 0 1 1 4 0v1a2 2 0 1 1-4 0Z"/><path d="M6 20v-1a2 2 0 1 0-4 0v1a2 2 0 1 0 4 0Z"/><path d="M2 19v-3a6 6 0 0 1 12 0v3"/></svg>',
     };
 
-    // Lightweight icon renderer using lucide's SVG without DOM mutations
+    // Lightweight icon renderer - prioritizes inline SVG fallbacks for reliability
     const Icon = ({ name, className = "w-5 h-5" }) => {
-      const svgHtml = React.useMemo(() => {
-        const lib = window.lucide?.icons;
-        // Try original name first
-        if (lib && lib[name]) {
-          try {
-            return lib[name].toSvg({ class: className });
-          } catch {}
-        }
-        // Try kebab-case conversion (e.g., "ChevronLeft" -> "chevron-left")
-        const kebabName = name.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase();
-        if (lib && lib[kebabName]) {
-          try {
-            return lib[kebabName].toSvg({ class: className });
-          } catch {}
-        }
-        // Check inline SVG fallbacks
-        const normalizedName = name.replace(/[-_\s]/g, '').toLowerCase();
-        if (ICON_SVG_FALLBACKS[normalizedName]) {
-          return ICON_SVG_FALLBACKS[normalizedName];
-        }
-        return '';
-      }, [name, className]);
+      // First, always check inline SVG fallbacks (most reliable)
+      const normalizedName = (name || '').replace(/[-_\s]/g, '').toLowerCase();
+      const fallbackSvg = ICON_SVG_FALLBACKS[normalizedName];
 
-      if (!svgHtml) {
-        // Graceful fallback: show a simple glyph so controls are still visible even if lucide hasn't loaded.
-        let fallback = '?';
-        const lower = (name || '').toLowerCase();
-        if (lower.includes('left')) fallback = '←';
-        else if (lower.includes('right')) fallback = '→';
-        else if (lower.includes('up')) fallback = '↑';
-        else if (lower.includes('down')) fallback = '↓';
-        else if (lower.includes('mic')) fallback = '🎤';
-        else if (lower.includes('square')) fallback = '⬛';
-        else if (lower.includes('check')) fallback = '✓';
-        else if (lower.includes('x') || lower.includes('close')) fallback = '✕';
-        else if (lower.includes('plus') || lower.includes('add')) fallback = '+';
-        else if (lower.includes('trash') || lower.includes('delete')) fallback = '🗑';
-        else if (lower.includes('upload')) fallback = '⬆';
-        else if (lower.includes('download')) fallback = '⬇';
-        else if (lower.includes('mail')) fallback = '✉';
-        return <span className={`${className} inline-flex items-center justify-center`} aria-hidden="true">{fallback}</span>;
+      if (fallbackSvg) {
+        return (
+          <span
+            className={`${className} inline-flex items-center justify-center`}
+            aria-hidden="true"
+            dangerouslySetInnerHTML={{ __html: fallbackSvg }}
+          />
+        );
       }
 
-      return <span className={className} aria-hidden="true" dangerouslySetInnerHTML={{ __html: svgHtml }} />;
+      // Try lucide library as secondary option
+      const lib = window.lucide?.icons;
+      let svgHtml = '';
+
+      if (lib) {
+        // Try original name
+        if (lib[name]) {
+          try {
+            svgHtml = lib[name].toSvg({ class: className });
+          } catch {}
+        }
+        // Try kebab-case conversion
+        if (!svgHtml) {
+          const kebabName = name.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase();
+          if (lib[kebabName]) {
+            try {
+              svgHtml = lib[kebabName].toSvg({ class: className });
+            } catch {}
+          }
+        }
+      }
+
+      if (svgHtml) {
+        return <span className={className} aria-hidden="true" dangerouslySetInnerHTML={{ __html: svgHtml }} />;
+      }
+
+      // Final fallback: emoji/character glyphs
+      let fallback = '?';
+      const lower = (name || '').toLowerCase();
+      if (lower.includes('left')) fallback = '←';
+      else if (lower.includes('right')) fallback = '→';
+      else if (lower.includes('up')) fallback = '↑';
+      else if (lower.includes('down')) fallback = '↓';
+      else if (lower.includes('mic')) fallback = '🎤';
+      else if (lower.includes('square')) fallback = '⬛';
+      else if (lower.includes('check')) fallback = '✓';
+      else if (lower.includes('x') || lower.includes('close')) fallback = '✕';
+      else if (lower.includes('plus') || lower.includes('add')) fallback = '+';
+      else if (lower.includes('trash') || lower.includes('delete')) fallback = '🗑';
+      else if (lower.includes('upload')) fallback = '⬆';
+      else if (lower.includes('download')) fallback = '⬇';
+      else if (lower.includes('mail')) fallback = '✉';
+      return <span className={`${className} inline-flex items-center justify-center`} aria-hidden="true">{fallback}</span>;
     };
 
     const blobToBase64 = (blob) =>
@@ -868,10 +881,22 @@
           return;
         }
 
+        let lastScrollY = window.scrollY;
+        let ticking = false;
+
         const handleScroll = () => {
-          const scrollY = window.scrollY || document.documentElement.scrollTop;
-          const threshold = 120; // Collapse header after scrolling 120px
-          setIsHeaderCollapsed(scrollY > threshold);
+          lastScrollY = window.scrollY || document.documentElement.scrollTop;
+
+          if (!ticking) {
+            window.requestAnimationFrame(() => {
+              const threshold = 120;
+              const shouldCollapse = lastScrollY > threshold;
+              // Only update state if it actually changed
+              setIsHeaderCollapsed(prev => prev !== shouldCollapse ? shouldCollapse : prev);
+              ticking = false;
+            });
+            ticking = true;
+          }
         };
 
         window.addEventListener('scroll', handleScroll, { passive: true });
