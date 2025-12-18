@@ -1239,6 +1239,90 @@
         return () => window.removeEventListener('keydown', handleKeyPress);
       }, [isRecording, isPaused, editingStudent, rubricItems, students, grades, selectedTeacher, selectedSections, assignmentName, sessionId]);
 
+      // Keyboard shortcuts for PDF grading mode navigation
+      const pdfKeyboardHandlerRef = useRef(null);
+
+      // Helper to navigate students with audio processing (mirrors handleNextStudent logic)
+      const navigateToStudent = async (targetStudentId) => {
+        // Save current student before moving
+        if (currentGradingStudentId) {
+          if (typeof saveStudentGradeToN8n === 'function') {
+            try {
+              await saveStudentGradeToN8n(currentGradingStudentId);
+            } catch (err) {
+              console.error('Error saving grade (continuing anyway):', err);
+            }
+          }
+        }
+
+        // Process audio if recording
+        if (isRecording) {
+          try {
+            await processCurrentAudioChunk();
+          } catch (err) {
+            console.error('Error processing audio chunk (continuing anyway):', err);
+          }
+        }
+
+        setCurrentGradingStudentId(targetStudentId);
+      };
+
+      useEffect(() => {
+        // Store handler in ref so we can access latest state values
+        pdfKeyboardHandlerRef.current = (e) => {
+          const tag = (e.target.tagName || '').toLowerCase();
+          const isTyping = tag === 'input' || tag === 'textarea' || e.target.isContentEditable;
+          if (isTyping) return;
+
+          // Only handle arrow keys in grading mode with PDFs
+          const hasAnyPDFs = uploadedPDFs.length > 0;
+          if (step !== 'grading' || !hasAnyPDFs) return;
+
+          const studentList = orderedStudents.length > 0 ? orderedStudents : students;
+          const currentGradingStudent = students.find(
+            (s) => s.studentId === currentGradingStudentId || s.id === currentGradingStudentId
+          );
+          const currentIndex = currentGradingStudent ? studentList.findIndex((s) => s.id === currentGradingStudent.id) : -1;
+          const prevStudent = currentIndex > 0 ? studentList[currentIndex - 1] : null;
+          const nextStudent = currentIndex !== -1 && currentIndex < studentList.length - 1 ? studentList[currentIndex + 1] : null;
+
+          switch (e.code) {
+            case 'ArrowLeft':
+              e.preventDefault();
+              if (prevStudent) {
+                navigateToStudent(prevStudent.id);
+              }
+              break;
+            case 'ArrowRight':
+              e.preventDefault();
+              if (nextStudent) {
+                navigateToStudent(nextStudent.id);
+              }
+              break;
+            case 'ArrowUp':
+              e.preventDefault();
+              if (pdfPage > 1) {
+                setPdfPage(pdfPage - 1);
+              }
+              break;
+            case 'ArrowDown':
+              e.preventDefault();
+              setPdfPage(pdfPage + 1);
+              break;
+          }
+        };
+      }, [step, uploadedPDFs, orderedStudents, students, currentGradingStudentId, pdfPage, isRecording]);
+
+      useEffect(() => {
+        const handleKeyDown = (e) => {
+          if (pdfKeyboardHandlerRef.current) {
+            pdfKeyboardHandlerRef.current(e);
+          }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+      }, []);
+
       useEffect(() => {
         if (step === 'review') {
           fetchGradingData();
@@ -1261,6 +1345,99 @@
         });
         if (!response.ok) throw new Error(`Airtable API error: ${response.status} ${response.statusText}`);
         return response.json();
+      };
+
+      // Airtable upsert function - updates existing records or creates new ones
+      // Uses Airtable's performUpsert feature to match on specified fields
+      const airtableUpsert = async (tableName, records, fieldsToMergeOn) => {
+        const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(tableName)}`;
+
+        // Airtable has a limit of 10 records per request
+        const BATCH_SIZE = 10;
+        const results = [];
+
+        for (let i = 0; i < records.length; i += BATCH_SIZE) {
+          const batch = records.slice(i, i + BATCH_SIZE);
+          const response = await fetch(url, {
+            method: 'PATCH',
+            headers: {
+              'Authorization': `Bearer ${CONFIG.AIRTABLE_API_KEY}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              performUpsert: {
+                fieldsToMergeOn: fieldsToMergeOn
+              },
+              records: batch.map(fields => ({ fields }))
+            })
+          });
+
+          if (!response.ok) {
+            const errorText = await response.text().catch(() => '');
+            throw new Error(`Airtable upsert error: ${response.status} ${errorText}`);
+          }
+
+          const data = await response.json();
+          results.push(...(data.records || []));
+        }
+
+        return results;
+      };
+
+      // Save student grade directly to Airtable (replaces n8n webhook)
+      const saveStudentGradeToAirtable = async (studentId) => {
+        if (!studentId || !grades[studentId]) return;
+
+        const g = grades[studentId];
+        // Only save if completed or partially graded
+        if (!g.completed && Object.keys(g.scores).length === 0 && !g.comments) return;
+
+        const student = students.find(s => s.id === studentId);
+        if (!student) return;
+
+        console.log(`Saving grade for ${student.name} to Airtable...`);
+
+        // Convert student ID to number for Airtable (SID field is Integer type)
+        const sidNumber = parseInt(student.studentId, 10) || null;
+
+        // Build records for each rubric score
+        const records = Object.entries(normalizeScoresMap(g.scores)).map(([rubricName, score]) => {
+          const record = {
+            'Rubric Item Name': rubricName,
+            'SID': sidNumber,
+            'Assignment': assignmentName,
+            'Grade': score,
+            'Comments': g.comments || ''
+          };
+
+          // Add linked records if available
+          if (student.id) {
+            record['Student'] = [student.id];
+          }
+          if (assignmentRecordId) {
+            record['Voice Grader'] = [assignmentRecordId];
+          }
+          const rubricItemId = rubricItemIds[rubricName];
+          if (rubricItemId) {
+            record['Rurbic'] = [rubricItemId]; // Note: field name is misspelled in Airtable
+          }
+
+          return record;
+        });
+
+        if (records.length === 0) return;
+
+        try {
+          await airtableUpsert(
+            CONFIG.TABLES.GRADES,
+            records,
+            ['SID', 'Assignment', 'Rubric Item Name']
+          );
+          console.log(`Grade saved successfully for ${student.name}`);
+        } catch (err) {
+          console.error(`Grade save failed for ${student.name}:`, err);
+          throw err;
+        }
       };
 
       const n8nRequest = async (webhookUrl, payload) => {
@@ -1634,46 +1811,8 @@
         }
       };
 
-      const saveStudentGradeToN8n = async (studentId) => {
-        if (!studentId || !grades[studentId]) return;
-
-        const g = grades[studentId];
-        // Only save if completed or partially graded
-        if (!g.completed && Object.keys(g.scores).length === 0 && !g.comments) return;
-
-        const student = students.find(s => s.id === studentId);
-        if (!student) return;
-
-        console.log(`Auto-saving grade for ${student.name}...`);
-
-        // Transform rubric scores to include record IDs
-          const rubricScoresArray = Object.entries(normalizeScoresMap(g.scores)).map(([rubricName, score]) => ({
-            rubricItemId: rubricItemIds[rubricName] || null,
-            name: rubricName,
-            score: score
-          }));
-
-        const payload = {
-          assignmentRecordId: assignmentRecordId,
-          gradeRecordId: g.recordId || null,
-          studentRecordId: student.id, // Airtable student record ID
-          studentId: student.studentId || student.id,
-          studentName: student.name,
-          rubricScores: rubricScoresArray,
-          comments: g.comments,
-          finalGrade: calculateTotal(g),
-          assignmentName: assignmentName,
-          sectionIds: selectedSections.map(s => s.id),
-          teacherId: selectedTeacher?.id
-        };
-
-        try {
-          await n8nRequest(CONFIG.N8N_GRADE_UPDATE_WEBHOOK_URL, payload);
-          console.log(`Auto-save successful for ${student.name}`);
-        } catch (err) {
-          console.error(`Auto-save failed for ${student.name}:`, err);
-        }
-      };
+      // Alias for backward compatibility - uses new direct Airtable API
+      const saveStudentGradeToN8n = saveStudentGradeToAirtable;
 
       // Fetch existing grade data when entering review screen
       // Currently uses local state; can be extended to pull from Airtable if needed
@@ -2467,35 +2606,14 @@
               setCurrentStudent(matchedStudents[matchedStudents.length - 1]);
             }
 
-            // Immediately sync graded students to n8n (no debounce)
+            // Immediately sync graded students to Airtable (no debounce)
             Object.entries(gradeUpdates).forEach(([studentId, gradeData]) => {
               const student = students.find(s => s.id === studentId);
               if (student) {
-                console.log(`${logPrefix} Syncing grade to n8n for ${student.name}...`);
-
-                // Transform rubric scores to include record IDs
-                const rubricScoresArray = Object.entries(normalizeScoresMap(gradeData.scores || {})).map(([rubricName, score]) => ({
-                  rubricItemId: rubricItemIds[rubricName] || null,
-                  name: rubricName,
-                  score: score
-                }));
-
-                const payload = {
-                  assignmentRecordId: assignmentRecordId,
-                  studentRecordId: student.id,
-                  studentId: student.studentId || student.id,
-                  studentName: student.name,
-                  rubricScores: rubricScoresArray,
-                  comments: gradeData.comments || '',
-                  finalGrade: Object.values(normalizeScoresMap(gradeData.scores || {})).reduce((sum, s) => sum + (s || 0), 0),
-                  assignmentName: assignmentName,
-                  sectionIds: selectedSections.map(s => s.id),
-                  teacherId: selectedTeacher?.id
-                };
-
-                n8nRequest(CONFIG.N8N_GRADE_UPDATE_WEBHOOK_URL, payload)
-                  .then(() => console.log(`${logPrefix} ✅ n8n sync complete for ${student.name}`))
-                  .catch(err => console.error(`${logPrefix} ❌ n8n sync failed for ${student.name}:`, err));
+                console.log(`${logPrefix} Syncing grade to Airtable for ${student.name}...`);
+                saveStudentGradeToAirtable(studentId)
+                  .then(() => console.log(`${logPrefix} ✅ Airtable sync complete for ${student.name}`))
+                  .catch(err => console.error(`${logPrefix} ❌ Airtable sync failed for ${student.name}:`, err));
               }
             });
           }
@@ -3097,30 +3215,7 @@
 
         gradeSyncTimeouts.current[studentId] = setTimeout(async () => {
           try {
-            const student = students.find(s => s.id === studentId);
-
-            // Transform rubric scores to include record IDs (matching saveStudentGradeToN8n format)
-            const rubricScoresArray = Object.entries(normalizeScoresMap(gradeData.scores || {})).map(([rubricName, score]) => ({
-              rubricItemId: rubricItemIds[rubricName] || null,
-              name: rubricName,
-              score: score
-            }));
-
-            const payload = {
-              assignmentRecordId: assignmentRecordId,
-              studentRecordId: student?.id, // Airtable student record ID
-              studentId: student ? (student.studentId || student.id) : studentId, // Send school ID if available
-              studentName: student?.name,
-              rubricScores: rubricScoresArray,
-              comments: gradeData.comments,
-              finalGrade: calculateTotal(gradeData),
-              assignmentName: assignmentName,
-              sectionIds: selectedSections.map(s => s.id),
-              teacherId: selectedTeacher?.id
-            };
-
-            await n8nRequest(CONFIG.N8N_GRADE_UPDATE_WEBHOOK_URL, payload);
-            // Optional: Handle returned record IDs if needed
+            await saveStudentGradeToAirtable(studentId);
           } catch (err) {
             console.error("Grade sync error", err);
           }
@@ -3423,27 +3518,12 @@
         try {
           for (let i = 0; i < completedGrades.length; i++) {
             const [studentId, gradeData] = completedGrades[i];
-            const student = students.find(s => s.id === studentId);
-
-            const payload = {
-              assignmentRecordId: assignmentRecordId,
-              studentId: student ? (student.studentId || student.id) : studentId,
-              studentName: student?.name,
-              rubricScores: normalizeScoresMap(gradeData.scores),
-              comments: gradeData.comments,
-              finalGrade: calculateTotal(gradeData),
-              assignmentName: assignmentName,
-              sectionIds: selectedSections.map(s => s.id),
-              teacherId: selectedTeacher?.id
-            };
-
-            await n8nRequest(CONFIG.N8N_GRADE_UPDATE_WEBHOOK_URL, payload);
-
+            await saveStudentGradeToAirtable(studentId);
             setUploadProgress(prev => ({ ...prev, current: i + 1 }));
           }
 
           setUploadComplete(true);
-          console.log('Upload complete via n8n!');
+          console.log('Upload complete via Airtable API!');
 
         } catch (err) {
           console.error('Upload error:', err);
@@ -4744,7 +4824,7 @@
                                 <div className="text-xs font-normal text-pacifica-slate">(/{item.maxPoints})</div>
                                 {avg !== null && (
                                   <div className="text-xs font-normal text-pacifica-orange opacity-75" title="Session average">
-                                    x̄: {avg.toFixed(1)}
+                                    <span className="inline-block" style={{ textDecoration: 'overline', fontStyle: 'italic', fontWeight: 500 }}>x</span>: {avg.toFixed(1)}
                                   </div>
                                 )}
                               </th>
@@ -4966,7 +5046,7 @@
                             <div className="flex items-center gap-2">
                               {avg !== null && (
                                 <span className="text-xs text-pacifica-slate" title="Session average">
-                                  x̄: {avg.toFixed(1)}
+                                  <span className="inline-block" style={{ textDecoration: 'overline', fontStyle: 'italic', fontWeight: 500 }}>x</span>: {avg.toFixed(1)}
                                 </span>
                               )}
                               <span className="text-xs text-gray-500">Max: {item.maxPoints}</span>
@@ -5082,7 +5162,7 @@
                               <p className="text-xs text-pacifica-slate">Max: {item.maxPoints} points</p>
                               {avg !== null && (
                                 <span className="text-xs text-pacifica-orange opacity-75" title="Session average">
-                                  (x̄: {avg.toFixed(1)})
+                                  (<span className="inline-block" style={{ textDecoration: 'overline', fontStyle: 'italic', fontWeight: 500 }}>x</span>: {avg.toFixed(1)})
                                 </span>
                               )}
                             </div>
