@@ -1239,6 +1239,64 @@
         return () => window.removeEventListener('keydown', handleKeyPress);
       }, [isRecording, isPaused, editingStudent, rubricItems, students, grades, selectedTeacher, selectedSections, assignmentName, sessionId]);
 
+      // Keyboard shortcuts for PDF grading mode navigation
+      const pdfKeyboardHandlerRef = useRef(null);
+      useEffect(() => {
+        // Store handler in ref so we can access latest state values
+        pdfKeyboardHandlerRef.current = (e) => {
+          const tag = (e.target.tagName || '').toLowerCase();
+          const isTyping = tag === 'input' || tag === 'textarea' || e.target.isContentEditable;
+          if (isTyping) return;
+
+          // Only handle arrow keys in grading mode with PDFs
+          const hasAnyPDFs = uploadedPDFs.length > 0;
+          if (step !== 'grading' || !hasAnyPDFs) return;
+
+          const studentList = orderedStudents.length > 0 ? orderedStudents : students;
+          const currentGradingStudent = students.find(
+            (s) => s.studentId === currentGradingStudentId || s.id === currentGradingStudentId
+          );
+          const currentIndex = currentGradingStudent ? studentList.findIndex((s) => s.id === currentGradingStudent.id) : -1;
+          const prevStudent = currentIndex > 0 ? studentList[currentIndex - 1] : null;
+          const nextStudent = currentIndex !== -1 && currentIndex < studentList.length - 1 ? studentList[currentIndex + 1] : null;
+
+          switch (e.code) {
+            case 'ArrowLeft':
+              e.preventDefault();
+              if (prevStudent) {
+                setCurrentGradingStudentId(prevStudent.id);
+              }
+              break;
+            case 'ArrowRight':
+              e.preventDefault();
+              if (nextStudent) {
+                setCurrentGradingStudentId(nextStudent.id);
+              }
+              break;
+            case 'ArrowUp':
+              e.preventDefault();
+              if (pdfPage > 1) {
+                setPdfPage(pdfPage - 1);
+              }
+              break;
+            case 'ArrowDown':
+              e.preventDefault();
+              setPdfPage(pdfPage + 1);
+              break;
+          }
+        };
+      }, [step, uploadedPDFs, orderedStudents, students, currentGradingStudentId, pdfPage]);
+
+      useEffect(() => {
+        const handleKeyDown = (e) => {
+          if (pdfKeyboardHandlerRef.current) {
+            pdfKeyboardHandlerRef.current(e);
+          }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+      }, []);
+
       useEffect(() => {
         if (step === 'review') {
           fetchGradingData();
@@ -4744,7 +4802,7 @@
                                 <div className="text-xs font-normal text-pacifica-slate">(/{item.maxPoints})</div>
                                 {avg !== null && (
                                   <div className="text-xs font-normal text-pacifica-orange opacity-75" title="Session average">
-                                    x̄: {avg.toFixed(1)}
+                                    <span className="inline-block" style={{ textDecoration: 'overline', fontStyle: 'italic', fontWeight: 500 }}>x</span>: {avg.toFixed(1)}
                                   </div>
                                 )}
                               </th>
@@ -4966,7 +5024,7 @@
                             <div className="flex items-center gap-2">
                               {avg !== null && (
                                 <span className="text-xs text-pacifica-slate" title="Session average">
-                                  x̄: {avg.toFixed(1)}
+                                  <span className="inline-block" style={{ textDecoration: 'overline', fontStyle: 'italic', fontWeight: 500 }}>x</span>: {avg.toFixed(1)}
                                 </span>
                               )}
                               <span className="text-xs text-gray-500">Max: {item.maxPoints}</span>
@@ -5082,7 +5140,7 @@
                               <p className="text-xs text-pacifica-slate">Max: {item.maxPoints} points</p>
                               {avg !== null && (
                                 <span className="text-xs text-pacifica-orange opacity-75" title="Session average">
-                                  (x̄: {avg.toFixed(1)})
+                                  (<span className="inline-block" style={{ textDecoration: 'overline', fontStyle: 'italic', fontWeight: 500 }}>x</span>: {avg.toFixed(1)})
                                 </span>
                               )}
                             </div>
