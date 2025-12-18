@@ -1241,6 +1241,32 @@
 
       // Keyboard shortcuts for PDF grading mode navigation
       const pdfKeyboardHandlerRef = useRef(null);
+
+      // Helper to navigate students with audio processing (mirrors handleNextStudent logic)
+      const navigateToStudent = async (targetStudentId) => {
+        // Save current student before moving
+        if (currentGradingStudentId) {
+          if (typeof saveStudentGradeToN8n === 'function') {
+            try {
+              await saveStudentGradeToN8n(currentGradingStudentId);
+            } catch (err) {
+              console.error('Error saving grade (continuing anyway):', err);
+            }
+          }
+        }
+
+        // Process audio if recording
+        if (isRecording) {
+          try {
+            await processCurrentAudioChunk();
+          } catch (err) {
+            console.error('Error processing audio chunk (continuing anyway):', err);
+          }
+        }
+
+        setCurrentGradingStudentId(targetStudentId);
+      };
+
       useEffect(() => {
         // Store handler in ref so we can access latest state values
         pdfKeyboardHandlerRef.current = (e) => {
@@ -1264,13 +1290,13 @@
             case 'ArrowLeft':
               e.preventDefault();
               if (prevStudent) {
-                setCurrentGradingStudentId(prevStudent.id);
+                navigateToStudent(prevStudent.id);
               }
               break;
             case 'ArrowRight':
               e.preventDefault();
               if (nextStudent) {
-                setCurrentGradingStudentId(nextStudent.id);
+                navigateToStudent(nextStudent.id);
               }
               break;
             case 'ArrowUp':
@@ -1285,7 +1311,7 @@
               break;
           }
         };
-      }, [step, uploadedPDFs, orderedStudents, students, currentGradingStudentId, pdfPage]);
+      }, [step, uploadedPDFs, orderedStudents, students, currentGradingStudentId, pdfPage, isRecording]);
 
       useEffect(() => {
         const handleKeyDown = (e) => {
