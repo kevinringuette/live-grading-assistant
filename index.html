@@ -1725,6 +1725,13 @@
         setShowTeacherAssignments(false);
       }, [selectedTeacher?.id]);
 
+      // Prefetch Voice Grader assignments when landing on the section picker so the modal has data ready
+      useEffect(() => {
+        if (step === 'section-select' && selectedTeacher?.id) {
+          loadVoiceGraderAssignments();
+        }
+      }, [step, selectedTeacher?.id]);
+
       const startRecording = async () => {
         try {
           if (!micSupported) {
@@ -3442,18 +3449,17 @@
                 <div className="mb-6 p-4 bg-pacifica-navy/5 rounded-lg border border-pacifica-navy/20">
                   <div className="flex items-center justify-between mb-3">
                     <div>
-                      <p className="text-sm font-semibold text-pacifica-navy">Continue a previous assignment</p>
-                      <p className="text-xs text-pacifica-slate">Load rubric and go directly to grading.</p>
+                      <p className="text-sm font-semibold text-pacifica-navy">Continue grading a past assignment</p>
+                      <p className="text-xs text-pacifica-slate">Open your teacher-specific list and jump straight to grading.</p>
                     </div>
                     <button
                       onClick={() => {
-                        loadVoiceGraderAssignments();
                         setShowTeacherAssignments(true);
+                        loadVoiceGraderAssignments();
                       }}
-                      disabled={voiceGraderAssignmentsLoading}
                       className="text-sm px-3 py-1 rounded-md border border-pacifica-navy text-pacifica-navy hover:bg-pacifica-navy hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      {voiceGraderAssignmentsLoading ? 'Loading...' : 'Open Past Assignments'}
+                      {voiceGraderAssignmentsLoading ? 'Loading past assignments...' : 'Open past assignments'}
                     </button>
                   </div>
                 </div>
@@ -3553,7 +3559,7 @@
                       {voiceGraderAssignmentsLoading ? (
                         <>
                           <div className="animate-spin rounded-full h-4 w-4 border-2 border-pacifica-navy border-t-transparent"></div>
-                          Loading rubrics...
+                          Loading past assignments...
                         </>
                       ) : selectedVoiceAssignmentId ? (
                         teacherAssignments.find(a => a.id === selectedVoiceAssignmentId)?.name || 'Select Past Rubric'
