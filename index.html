@@ -32,7 +32,11 @@
             'radar-pulse-delay': 'radar-pulse 1.5s ease-out infinite 0.5s',
             'radar-pulse-delay2': 'radar-pulse 1.5s ease-out infinite 1s',
             'slide-up': 'slide-up 0.3s ease-out forwards',
-            'slide-down': 'slide-down 0.3s ease-out forwards'
+            'slide-down': 'slide-down 0.3s ease-out forwards',
+            'modal-slide-up': 'modal-slide-up 0.3s ease-out forwards',
+            'modal-slide-down': 'modal-slide-down 0.2s ease-in forwards',
+            'backdrop-fade-in': 'backdrop-fade-in 0.2s ease-out forwards',
+            'backdrop-fade-out': 'backdrop-fade-out 0.2s ease-in forwards'
           },
           keyframes: {
             fadeIn: {
@@ -50,6 +54,22 @@
             'slide-down': {
               '0%': { opacity: '0', transform: 'translateY(-20px)', maxHeight: '0px' },
               '100%': { opacity: '1', transform: 'translateY(0)', maxHeight: '200px' }
+            },
+            'modal-slide-up': {
+              '0%': { opacity: '0', transform: 'translateY(100%)' },
+              '100%': { opacity: '1', transform: 'translateY(0)' }
+            },
+            'modal-slide-down': {
+              '0%': { opacity: '1', transform: 'translateY(0)' },
+              '100%': { opacity: '0', transform: 'translateY(100%)' }
+            },
+            'backdrop-fade-in': {
+              '0%': { opacity: '0' },
+              '100%': { opacity: '1' }
+            },
+            'backdrop-fade-out': {
+              '0%': { opacity: '1' },
+              '100%': { opacity: '0' }
             }
           }
         }
@@ -130,6 +150,57 @@
     .btn-danger:hover {
       background: #c92a2a;
       border-color: #c92a2a;
+    }
+
+    /* Range slider styling for manual rubric grading */
+    input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      height: 12px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: #e55204;
+      cursor: pointer;
+      border: 3px solid white;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    input[type="range"]::-webkit-slider-thumb:hover {
+      transform: scale(1.1);
+      box-shadow: 0 3px 8px rgba(0, 0, 0, 0.3);
+    }
+
+    input[type="range"]::-moz-range-thumb {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: #e55204;
+      cursor: pointer;
+      border: 3px solid white;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    input[type="range"]::-moz-range-thumb:hover {
+      transform: scale(1.1);
+      box-shadow: 0 3px 8px rgba(0, 0, 0, 0.3);
+    }
+
+    input[type="range"]:focus {
+      outline: none;
+    }
+
+    input[type="range"]:focus::-webkit-slider-thumb {
+      box-shadow: 0 0 0 4px rgba(229, 82, 4, 0.2), 0 2px 6px rgba(0, 0, 0, 0.2);
     }
 
     /* Light global normalization for any <button> not using .btn */
@@ -823,6 +894,29 @@
       const [selectedColumn, setSelectedColumn] = useState(null);
       const [editingStudent, setEditingStudent] = useState(null);
       const [editingField, setEditingField] = useState(null);
+      const [showManualRubricModal, setShowManualRubricModal] = useState(false);
+      const [manualRubricStudent, setManualRubricStudent] = useState(null);
+      const [isManualModalClosing, setIsManualModalClosing] = useState(false);
+
+      // Close manual rubric modal on Escape key
+      useEffect(() => {
+        const handleEscapeKey = (e) => {
+          if (e.key === 'Escape' && showManualRubricModal && !isManualModalClosing) {
+            setIsManualModalClosing(true);
+            setTimeout(() => {
+              setShowManualRubricModal(false);
+              setManualRubricStudent(null);
+              setIsManualModalClosing(false);
+            }, 200);
+          }
+        };
+
+        if (showManualRubricModal) {
+          window.addEventListener('keydown', handleEscapeKey);
+          return () => window.removeEventListener('keydown', handleEscapeKey);
+        }
+      }, [showManualRubricModal, isManualModalClosing]);
+
       const [sessionId, setSessionId] = useState(null);
       const [micError, setMicError] = useState(null);
       const [processingAudio, setProcessingAudio] = useState(false);
@@ -4445,7 +4539,9 @@
                 Students
                 <span className="text-xs text-pacifica-slate">{completedStudentIds.size}/{students.length}</span>
               </h3>
-              <p className="text-xs text-pacifica-slate mt-1">Green = graded</p>
+              <p className="text-xs text-pacifica-slate mt-1">
+                {hasAnyPDFs ? 'Green = graded' : 'Click a student to manually enter grades'}
+              </p>
             </div>
             <div className="flex-1 overflow-y-auto divide-y divide-gray-100">
               {students.length === 0 ? (
@@ -4453,16 +4549,30 @@
               ) : (
                 students.map((s) => {
                   const done = completedStudentIds.has(s.id);
+                  const studentGrade = grades[s.id] || { scores: {}, comments: '', completed: false };
+                  const studentTotal = calculateTotal(studentGrade);
                   return (
                     <button
                       key={s.id}
-                      onClick={() => setCurrentGradingStudentId(s.id)}
+                      onClick={() => {
+                        setCurrentGradingStudentId(s.id);
+                        if (!hasAnyPDFs) {
+                          setManualRubricStudent(s);
+                          setShowManualRubricModal(true);
+                        }
+                      }}
                       className={`w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-pacifica-orange/10 transition ${done ? 'bg-green-50' : ''}`}
                     >
                       <span className={`w-5 h-5 inline-flex items-center justify-center rounded-full text-xs font-bold ${done ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-500'}`}>
                         {done ? '✓' : '•'}
                       </span>
-                      <span className="truncate text-sm text-pacifica-navy">{s.name}</span>
+                      <span className="truncate text-sm text-pacifica-navy flex-1">{s.name}</span>
+                      {!hasAnyPDFs && (
+                        <span className="flex items-center gap-1 text-xs text-pacifica-slate">
+                          {done && <span className="font-medium text-green-600">{studentTotal}</span>}
+                          <Icon name="Edit3" className="w-3.5 h-3.5" />
+                        </span>
+                      )}
                     </button>
                   );
                 })
@@ -4791,10 +4901,168 @@
           voiceOnlyPanel
         );
 
+        const closeManualRubricModal = () => {
+          setIsManualModalClosing(true);
+          setTimeout(() => {
+            setShowManualRubricModal(false);
+            setManualRubricStudent(null);
+            setIsManualModalClosing(false);
+          }, 200);
+        };
+
+        const manualRubricModal = showManualRubricModal && manualRubricStudent && (
+          <div
+            className={`fixed inset-0 z-50 flex items-end justify-center ${isManualModalClosing ? 'animate-backdrop-fade-out' : 'animate-backdrop-fade-in'}`}
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                closeManualRubricModal();
+              }
+            }}
+            style={{ backgroundColor: 'rgba(0, 0, 0, 0.5)' }}
+          >
+            <div
+              className={`bg-white rounded-t-2xl shadow-2xl w-full max-w-4xl max-h-[75vh] flex flex-col ${isManualModalClosing ? 'animate-modal-slide-down' : 'animate-modal-slide-up'}`}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 shrink-0">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-full bg-pacifica-orange bg-opacity-20 text-pacifica-orange flex items-center justify-center font-bold text-lg">
+                    {getInitials(manualRubricStudent.name)}
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-bold text-pacifica-navy">{manualRubricStudent.name}</h2>
+                    <p className="text-sm text-pacifica-slate">ID: {manualRubricStudent.studentId}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  <div className="text-right">
+                    <p className="text-sm text-pacifica-slate">Total Score</p>
+                    <p className="text-2xl font-bold text-pacifica-navy">
+                      {calculateTotal(grades[manualRubricStudent.id] || { scores: {} })} / {calculateMaxTotal()}
+                    </p>
+                  </div>
+                  <button
+                    onClick={closeManualRubricModal}
+                    className="p-2 rounded-full hover:bg-gray-100 transition-colors"
+                  >
+                    <Icon name="X" className="w-6 h-6 text-gray-500" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Rubric Items */}
+              <div className="flex-1 overflow-y-auto px-6 py-4">
+                <div className="space-y-6">
+                  {rubricItems.map((item, idx) => {
+                    const currentScore = normalizeScoreValue(grades[manualRubricStudent.id]?.scores?.[item.name]) || 0;
+                    const percentage = item.maxPoints > 0 ? (currentScore / item.maxPoints) * 100 : 0;
+
+                    return (
+                      <div key={item.name} className="bg-gray-50 rounded-xl p-4 border border-gray-200">
+                        <div className="flex items-center justify-between mb-3">
+                          <div>
+                            <h3 className="font-semibold text-pacifica-navy text-lg">{item.name}</h3>
+                            <p className="text-xs text-pacifica-slate">Max: {item.maxPoints} points</p>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <input
+                              type="number"
+                              min="0"
+                              max={item.maxPoints}
+                              value={currentScore}
+                              onChange={(e) => {
+                                const value = parseInt(e.target.value) || 0;
+                                const clampedValue = Math.max(0, Math.min(value, item.maxPoints));
+                                updateScore(manualRubricStudent.id, item.name, clampedValue);
+                              }}
+                              className="w-20 h-12 text-center text-xl font-bold border-2 border-pacifica-gray rounded-lg focus:border-pacifica-orange focus:outline-none focus:ring-2 focus:ring-pacifica-orange/20"
+                            />
+                            <span className="text-lg text-pacifica-slate font-medium">/ {item.maxPoints}</span>
+                          </div>
+                        </div>
+
+                        {/* Slider */}
+                        <div className="relative pt-2 pb-1">
+                          <input
+                            type="range"
+                            min="0"
+                            max={item.maxPoints}
+                            value={currentScore}
+                            onChange={(e) => updateScore(manualRubricStudent.id, item.name, parseInt(e.target.value))}
+                            className="w-full h-3 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-pacifica-orange"
+                            style={{
+                              background: `linear-gradient(to right, #e55204 0%, #e55204 ${percentage}%, #e5e7eb ${percentage}%, #e5e7eb 100%)`
+                            }}
+                          />
+                          <div className="flex justify-between text-xs text-gray-400 mt-1">
+                            <span>0</span>
+                            <span>{Math.round(item.maxPoints / 4)}</span>
+                            <span>{Math.round(item.maxPoints / 2)}</span>
+                            <span>{Math.round(item.maxPoints * 3 / 4)}</span>
+                            <span>{item.maxPoints}</span>
+                          </div>
+                        </div>
+
+                        {/* Quick Score Buttons */}
+                        <div className="flex gap-2 mt-3 flex-wrap">
+                          {[0, 0.25, 0.5, 0.75, 1].map((fraction) => {
+                            const val = Math.round(item.maxPoints * fraction);
+                            const isSelected = currentScore === val;
+                            return (
+                              <button
+                                key={fraction}
+                                onClick={() => updateScore(manualRubricStudent.id, item.name, val)}
+                                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                                  isSelected
+                                    ? 'bg-pacifica-orange text-white shadow-sm'
+                                    : 'bg-white border border-gray-300 text-gray-700 hover:bg-pacifica-orange/10 hover:border-pacifica-orange/30'
+                                }`}
+                              >
+                                {val} ({Math.round(fraction * 100)}%)
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Comments Section */}
+                <div className="mt-6 bg-gray-50 rounded-xl p-4 border border-gray-200">
+                  <h3 className="font-semibold text-pacifica-navy mb-2">Comments</h3>
+                  <textarea
+                    value={grades[manualRubricStudent.id]?.comments || ''}
+                    onChange={(e) => updateComments(manualRubricStudent.id, e.target.value)}
+                    placeholder="Add feedback or comments for this student..."
+                    className="w-full h-24 p-3 border border-gray-300 rounded-lg resize-none focus:border-pacifica-orange focus:outline-none focus:ring-2 focus:ring-pacifica-orange/20"
+                  />
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 shrink-0 flex items-center justify-between">
+                <p className="text-sm text-pacifica-slate">
+                  <Icon name="Check" className="w-4 h-4 inline mr-1 text-green-500" />
+                  Grades are saved automatically
+                </p>
+                <button
+                  onClick={closeManualRubricModal}
+                  className="px-6 py-2.5 bg-pacifica-orange text-white font-semibold rounded-lg hover:bg-pacifica-tangerine transition-colors shadow-sm"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+
         return (
           <div className="flex h-screen overflow-hidden bg-gray-100">
             {gradingSidebar}
             {gradingContent}
+            {manualRubricModal}
           </div>
         );
       }
