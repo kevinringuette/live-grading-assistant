@@ -3450,22 +3450,12 @@
                         loadVoiceGraderAssignments();
                         setShowTeacherAssignments(true);
                       }}
-                      disabled={voiceGraderAssignmentsLoading || teacherAssignments.length === 0}
+                      disabled={voiceGraderAssignmentsLoading}
                       className="text-sm px-3 py-1 rounded-md border border-pacifica-navy text-pacifica-navy hover:bg-pacifica-navy hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      {voiceGraderAssignmentsLoading
-                        ? 'Loading...'
-                        : (teacherAssignments.length > 0
-                          ? `View ${teacherAssignments.length} Past Assignments`
-                          : 'No Past Assignments')}
+                      {voiceGraderAssignmentsLoading ? 'Loading...' : 'Open Past Assignments'}
                     </button>
                   </div>
-
-                  <p className="text-sm text-pacifica-slate py-2">
-                    {teacherAssignments.length === 0
-                      ? 'No existing assignments found for this teacher yet.'
-                      : 'Click the button to view and select a past assignment.'}
-                  </p>
                 </div>
 
                 <div className="border-t border-pacifica-gray pt-4 mb-4">
@@ -3651,20 +3641,12 @@
                             {selectedTeacher?.name ? `For ${selectedTeacher.name}` : 'Select a teacher to view assignments'}
                           </p>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={loadVoiceGraderAssignments}
-                            className="text-sm text-pacifica-orange hover:text-pacifica-tangerine font-medium flex items-center gap-1"
-                          >
-                            <Icon name="RefreshCw" className="w-4 h-4" /> Refresh
-                          </button>
-                          <button
-                            onClick={() => setShowTeacherAssignments(false)}
-                            className="p-2 rounded-full hover:bg-pacifica-gray transition-colors"
-                          >
-                            <Icon name="X" className="w-5 h-5 text-pacifica-slate" />
-                          </button>
-                        </div>
+                        <button
+                          onClick={() => setShowTeacherAssignments(false)}
+                          className="p-2 rounded-full hover:bg-pacifica-gray transition-colors"
+                        >
+                          <Icon name="X" className="w-5 h-5 text-pacifica-slate" />
+                        </button>
                       </div>
                       <div className="flex-1 overflow-y-auto p-4 space-y-2">
                         {voiceGraderAssignmentsLoading ? (
@@ -3692,11 +3674,19 @@
                                 }}
                                 className="flex-shrink-0 inline-flex items-center gap-1 px-3 py-1.5 text-sm bg-pacifica-orange text-white rounded-md hover:bg-pacifica-tangerine transition-colors"
                               >
-                                <Icon name="ArrowRight" className="w-4 h-4" /> Grade Now
+                                <Icon name="Check" className="w-4 h-4" /> Select
                               </button>
                             </div>
                           ))
                         )}
+                      </div>
+                      <div className="p-4 border-t border-pacifica-gray flex justify-end">
+                        <button
+                          onClick={() => setShowTeacherAssignments(false)}
+                          className="px-4 py-2 text-sm font-medium text-pacifica-navy border border-pacifica-gray rounded-lg hover:bg-pacifica-gray transition-colors"
+                        >
+                          Cancel
+                        </button>
                       </div>
                     </div>
                   </div>
