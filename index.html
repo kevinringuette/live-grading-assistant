@@ -27,12 +27,29 @@
             'gotham': ['Gotham', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Arial', 'sans-serif']
           },
           animation: {
-            'fadeIn': 'fadeIn 0.3s ease-in-out'
+            'fadeIn': 'fadeIn 0.3s ease-in-out',
+            'radar-pulse': 'radar-pulse 1.5s ease-out infinite',
+            'radar-pulse-delay': 'radar-pulse 1.5s ease-out infinite 0.5s',
+            'radar-pulse-delay2': 'radar-pulse 1.5s ease-out infinite 1s',
+            'slide-up': 'slide-up 0.3s ease-out forwards',
+            'slide-down': 'slide-down 0.3s ease-out forwards'
           },
           keyframes: {
             fadeIn: {
               '0%': { opacity: '0', transform: 'scale(0.95)' },
               '100%': { opacity: '1', transform: 'scale(1)' }
+            },
+            'radar-pulse': {
+              '0%': { transform: 'scale(0.5)', opacity: '0.8' },
+              '100%': { transform: 'scale(2)', opacity: '0' }
+            },
+            'slide-up': {
+              '0%': { opacity: '1', transform: 'translateY(0)', maxHeight: '200px' },
+              '100%': { opacity: '0', transform: 'translateY(-20px)', maxHeight: '0px' }
+            },
+            'slide-down': {
+              '0%': { opacity: '0', transform: 'translateY(-20px)', maxHeight: '0px' },
+              '100%': { opacity: '1', transform: 'translateY(0)', maxHeight: '200px' }
             }
           }
         }
@@ -426,30 +443,92 @@
       registerManualTranscriptServiceWorker();
     }
 
-    // Lightweight icon renderer using lucide's SVG without DOM mutations
-    const Icon = ({ name, className = "w-5 h-5" }) => {
-      const svgHtml = React.useMemo(() => {
-        const lib = window.lucide?.icons;
-        if (!lib || !lib[name]) return '';
-        try {
-          return lib[name].toSvg({ class: className });
-        } catch {
-          return '';
-        }
-      }, [name, className]);
+    // Inline SVG fallbacks for critical icons
+    const ICON_SVG_FALLBACKS = {
+      mic: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>',
+      square: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/></svg>',
+      upload: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>',
+      mail: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>',
+      check: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+      checkcircle: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg>',
+      x: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>',
+      plus: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>',
+      trash2: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>',
+      arrowleft: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>',
+      arrowright: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>',
+      chevronleft: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>',
+      chevronright: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>',
+      chevronup: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>',
+      chevrondown: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
+      download: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>',
+      filetext: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>',
+      alertcircle: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>',
+      info: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>',
+      sparkles: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/></svg>',
+      minimize2: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" x2="21" y1="10" y2="3"/><line x1="3" x2="10" y1="21" y2="14"/></svg>',
+      clipboardcheck: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/></svg>',
+      fileaudio: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 22h.5c.5 0 1-.2 1.4-.6.4-.4.6-.9.6-1.4V7.5L14.5 2H6c-.5 0-1 .2-1.4.6C4.2 3 4 3.5 4 4v3"/><polyline points="14 2 14 8 20 8"/><path d="M10 20v-1a2 2 0 1 1 4 0v1a2 2 0 1 1-4 0Z"/><path d="M6 20v-1a2 2 0 1 0-4 0v1a2 2 0 1 0 4 0Z"/><path d="M2 19v-3a6 6 0 0 1 12 0v3"/></svg>',
+    };
 
-      if (!svgHtml) {
-        // Graceful fallback: show a simple glyph so controls are still visible even if lucide hasn't loaded.
-        let fallback = '•';
-        const lower = (name || '').toLowerCase();
-        if (lower.includes('left')) fallback = '←';
-        else if (lower.includes('right')) fallback = '→';
-        else if (lower.includes('up')) fallback = '↑';
-        else if (lower.includes('down')) fallback = '↓';
-        return <span className={`${className} inline-flex items-center justify-center`} aria-hidden="true">{fallback}</span>;
+    // Lightweight icon renderer - prioritizes inline SVG fallbacks for reliability
+    const Icon = ({ name, className = "w-5 h-5" }) => {
+      // First, always check inline SVG fallbacks (most reliable)
+      const normalizedName = (name || '').replace(/[-_\s]/g, '').toLowerCase();
+      const fallbackSvg = ICON_SVG_FALLBACKS[normalizedName];
+
+      if (fallbackSvg) {
+        return (
+          <span
+            className={`${className} inline-flex items-center justify-center`}
+            aria-hidden="true"
+            dangerouslySetInnerHTML={{ __html: fallbackSvg }}
+          />
+        );
       }
 
-      return <span className={className} aria-hidden="true" dangerouslySetInnerHTML={{ __html: svgHtml }} />;
+      // Try lucide library as secondary option
+      const lib = window.lucide?.icons;
+      let svgHtml = '';
+
+      if (lib) {
+        // Try original name
+        if (lib[name]) {
+          try {
+            svgHtml = lib[name].toSvg({ class: className });
+          } catch {}
+        }
+        // Try kebab-case conversion
+        if (!svgHtml) {
+          const kebabName = name.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase();
+          if (lib[kebabName]) {
+            try {
+              svgHtml = lib[kebabName].toSvg({ class: className });
+            } catch {}
+          }
+        }
+      }
+
+      if (svgHtml) {
+        return <span className={className} aria-hidden="true" dangerouslySetInnerHTML={{ __html: svgHtml }} />;
+      }
+
+      // Final fallback: emoji/character glyphs
+      let fallback = '?';
+      const lower = (name || '').toLowerCase();
+      if (lower.includes('left')) fallback = '←';
+      else if (lower.includes('right')) fallback = '→';
+      else if (lower.includes('up')) fallback = '↑';
+      else if (lower.includes('down')) fallback = '↓';
+      else if (lower.includes('mic')) fallback = '🎤';
+      else if (lower.includes('square')) fallback = '⬛';
+      else if (lower.includes('check')) fallback = '✓';
+      else if (lower.includes('x') || lower.includes('close')) fallback = '✕';
+      else if (lower.includes('plus') || lower.includes('add')) fallback = '+';
+      else if (lower.includes('trash') || lower.includes('delete')) fallback = '🗑';
+      else if (lower.includes('upload')) fallback = '⬆';
+      else if (lower.includes('download')) fallback = '⬇';
+      else if (lower.includes('mail')) fallback = '✉';
+      return <span className={`${className} inline-flex items-center justify-center`} aria-hidden="true">{fallback}</span>;
     };
 
     const blobToBase64 = (blob) =>
@@ -777,6 +856,11 @@
       const tableRef = useRef(null);
       const gradeSyncTimeouts = useRef({});
 
+      // Scroll-based sticky header state for review page
+      const [isHeaderCollapsed, setIsHeaderCollapsed] = useState(false);
+      const reviewScrollRef = useRef(null);
+      const headerRef = useRef(null);
+
       // PDF Grading State
       const [uploadedPDFs, setUploadedPDFs] = useState([]); // [{ file, filename, studentId, matchMethod }]
       const [showPDFMatchReview, setShowPDFMatchReview] = useState(false);
@@ -789,6 +873,35 @@
         setPdfPage(1);
         setPdfScale(1.0);
       }, [currentGradingStudentId]);
+
+      // Scroll handler for sticky header on review page
+      useEffect(() => {
+        if (step !== 'review') {
+          setIsHeaderCollapsed(false);
+          return;
+        }
+
+        let lastScrollY = window.scrollY;
+        let ticking = false;
+
+        const handleScroll = () => {
+          lastScrollY = window.scrollY || document.documentElement.scrollTop;
+
+          if (!ticking) {
+            window.requestAnimationFrame(() => {
+              const threshold = 120;
+              const shouldCollapse = lastScrollY > threshold;
+              // Only update state if it actually changed
+              setIsHeaderCollapsed(prev => prev !== shouldCollapse ? shouldCollapse : prev);
+              ticking = false;
+            });
+            ticking = true;
+          }
+        };
+
+        window.addEventListener('scroll', handleScroll, { passive: true });
+        return () => window.removeEventListener('scroll', handleScroll);
+      }, [step]);
 
       // PDF Matching Utilities
       const parsePDFFilename = (filename) => {
@@ -4057,10 +4170,16 @@
                     ) : (
                       <button
                         onClick={stopRecording}
-                        className="w-20 h-20 rounded-full bg-red-500 hover:bg-red-600 flex items-center justify-center transition-all shadow-lg"
+                        className="relative w-20 h-20 rounded-full bg-red-500 hover:bg-red-600 flex items-center justify-center transition-all shadow-lg overflow-visible"
                         title="Stop Recording"
                       >
-                        <Icon name="Square" className="w-8 h-8 text-white" />
+                        {/* Radar pulse rings */}
+                        <span className="absolute inset-0 rounded-full bg-red-400 animate-radar-pulse"></span>
+                        <span className="absolute inset-0 rounded-full bg-red-400 animate-radar-pulse-delay"></span>
+                        <span className="absolute inset-0 rounded-full bg-red-400 animate-radar-pulse-delay2"></span>
+                        <span className="relative z-10">
+                          <Icon name="Square" className="w-8 h-8 text-white" />
+                        </span>
                       </button>
                     )}
 
@@ -4388,12 +4507,21 @@
                   <div className="flex items-center gap-3">
                     <button
                       onClick={isRecording ? stopRecording : startRecording}
-                      className={`w-12 h-12 rounded-full flex items-center justify-center shadow-md transition ${
-                        isRecording ? 'bg-red-500 hover:bg-red-600' : 'bg-pacifica-orange hover:bg-pacifica-tangerine'
+                      className={`relative w-12 h-12 rounded-full flex items-center justify-center shadow-md transition ${
+                        isRecording ? 'bg-red-500 hover:bg-red-600 overflow-visible' : 'bg-pacifica-orange hover:bg-pacifica-tangerine'
                       }`}
                       title={isRecording ? 'Stop Recording' : 'Start Recording'}
                     >
-                      <Icon name={isRecording ? 'Square' : 'Mic'} className="w-6 h-6 text-white" />
+                      {isRecording && (
+                        <>
+                          <span className="absolute inset-0 rounded-full bg-red-400 animate-radar-pulse"></span>
+                          <span className="absolute inset-0 rounded-full bg-red-400 animate-radar-pulse-delay"></span>
+                          <span className="absolute inset-0 rounded-full bg-red-400 animate-radar-pulse-delay2"></span>
+                        </>
+                      )}
+                      <span className={isRecording ? 'relative z-10' : ''}>
+                        <Icon name={isRecording ? 'Square' : 'Mic'} className="w-6 h-6 text-white" />
+                      </span>
                     </button>
                     <button
                       onClick={processCurrentAudioChunk}
@@ -4679,6 +4807,49 @@
 
         return (
           <div key="review-interface" className="min-h-screen bg-pacifica-gray bg-opacity-10 p-6 relative">
+            {/* Compact sticky header - appears when scrolling down */}
+            <div
+              className={`fixed top-0 left-0 right-0 z-40 bg-white shadow-lg border-b border-pacifica-gray transition-all duration-300 ${
+                isHeaderCollapsed ? 'translate-y-0 opacity-100' : '-translate-y-full opacity-0 pointer-events-none'
+              }`}
+            >
+              <div className="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <h2 className="text-lg font-bold text-pacifica-navy">{assignmentName}</h2>
+                  <span className="text-sm text-pacifica-slate">
+                    {completedCount}/{students.length} graded
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  {!uploadComplete && (
+                    <>
+                      <button
+                        onClick={() => setStep('grading')}
+                        className="btn btn-outline text-sm py-1.5 px-3"
+                      >
+                        Back
+                      </button>
+                      <button
+                        onClick={submitFinalGrades}
+                        disabled={isSubmittingFinal || completedCount === 0}
+                        className="btn btn-primary text-sm py-1.5 px-3"
+                      >
+                        <Icon name="Upload" className="w-4 h-4" />
+                        Submit
+                      </button>
+                    </>
+                  )}
+                  <button
+                    onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+                    className="p-2 rounded-full hover:bg-pacifica-gray hover:bg-opacity-30 transition-colors"
+                    title="Scroll to top"
+                  >
+                    <Icon name="ChevronUp" className="w-5 h-5 text-pacifica-navy" />
+                  </button>
+                </div>
+              </div>
+            </div>
+
             {isUploading && (
               <div className="fixed inset-0 z-50 bg-black bg-opacity-70 flex flex-col items-center justify-center text-white">
                 <div className="animate-spin rounded-full h-16 w-16 border-4 border-white border-t-transparent mb-6"></div>
@@ -4687,7 +4858,13 @@
               </div>
             )}
             <div className="max-w-7xl mx-auto">
-              <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6 mb-6">
+              {/* Main header - slides away when scrolling down */}
+              <div
+                ref={headerRef}
+                className={`bg-white rounded-lg shadow-md border border-pacifica-gray p-6 mb-6 transition-all duration-300 overflow-hidden ${
+                  isHeaderCollapsed ? 'opacity-0 max-h-0 py-0 my-0 border-0' : 'opacity-100 max-h-[500px]'
+                }`}
+              >
                 <div className="flex items-center justify-between">
                   <div>
                     <h1 className="text-3xl font-bold text-pacifica-navy">Review Grades - {assignmentName}</h1>
@@ -4849,19 +5026,19 @@
               }
 
               <div className="bg-white rounded-lg shadow-md border border-pacifica-gray overflow-hidden mb-6">
-                <div className="p-4 bg-gradient-to-r from-pacifica-navy to-pacifica-midnight">
+                <div className="p-4 bg-gradient-to-r from-pacifica-navy to-pacifica-midnight sticky top-0 z-20" style={{ top: isHeaderCollapsed ? '52px' : '0' }}>
                   <h2 className="text-lg font-semibold text-white">
                     Grades Table ({Object.values(grades).filter(g => g.completed).length}/{students.length} graded)
                   </h2>
                   <p className="text-xs text-pacifica-gray mt-1">Click any cell to edit • Press Tab/Enter to navigate • Decimals supported</p>
                 </div>
 
-                <div className="overflow-x-auto">
+                <div className="overflow-x-auto max-h-[calc(100vh-200px)] overflow-y-auto">
                   <table className="w-full border-collapse">
-                    <thead className="bg-pacifica-gray bg-opacity-20 sticky top-0">
-                      <tr>
+                    <thead className="sticky top-0 z-10">
+                      <tr className="bg-gray-100">
                         <th
-                          className={`px-4 py-3 text-left text-xs font-semibold text-pacifica-navy border-b-2 border-pacifica-gray sticky left-0 bg-pacifica-gray bg-opacity-20 z-10 cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-20 ${selectedColumn === 0 ? 'bg-pacifica-orange bg-opacity-30' : ''}`}
+                          className={`px-4 py-3 text-left text-xs font-semibold text-pacifica-navy border-b-2 border-pacifica-gray sticky left-0 bg-gray-100 z-20 cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-20 ${selectedColumn === 0 ? 'bg-orange-100' : ''}`}
                           onClick={() => {
                             setSelectedColumn(selectedColumn === 0 ? null : 0);
                             setSelectedRow(null);
@@ -4873,7 +5050,7 @@
                         {rubricItems.map((item, idx) => (
                           <th
                             key={idx}
-                            className={`px-4 py-3 text-center text-xs font-semibold text-pacifica-navy border-b-2 border-pacifica-gray min-w-[120px] cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-20 ${selectedColumn === idx + 1 ? 'bg-pacifica-orange bg-opacity-30' : ''}`}
+                            className={`px-4 py-3 text-center text-xs font-semibold text-pacifica-navy border-b-2 border-pacifica-gray min-w-[120px] bg-gray-100 cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-20 ${selectedColumn === idx + 1 ? 'bg-orange-100' : ''}`}
                             onClick={() => {
                               setSelectedColumn(selectedColumn === idx + 1 ? null : idx + 1);
                               setSelectedRow(null);
@@ -4885,7 +5062,7 @@
                           </th>
                         ))}
                         <th
-                          className={`px-4 py-3 text-center text-xs font-semibold text-pacifica-navy border-b-2 border-pacifica-gray min-w-[100px] cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-20 ${selectedColumn === rubricItems.length + 1 ? 'bg-pacifica-orange bg-opacity-30' : ''}`}
+                          className={`px-4 py-3 text-center text-xs font-semibold text-pacifica-navy border-b-2 border-pacifica-gray min-w-[100px] bg-gray-100 cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-20 ${selectedColumn === rubricItems.length + 1 ? 'bg-orange-100' : ''}`}
                           onClick={() => {
                             setSelectedColumn(selectedColumn === rubricItems.length + 1 ? null : rubricItems.length + 1);
                             setSelectedRow(null);
@@ -4895,7 +5072,7 @@
                           Total
                         </th>
                         <th
-                          className={`px-4 py-3 text-left text-xs font-semibold text-pacifica-navy border-b-2 border-pacifica-gray min-w-[300px] cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-20 ${selectedColumn === rubricItems.length + 2 ? 'bg-pacifica-orange bg-opacity-30' : ''}`}
+                          className={`px-4 py-3 text-left text-xs font-semibold text-pacifica-navy border-b-2 border-pacifica-gray min-w-[300px] bg-gray-100 cursor-pointer hover:bg-pacifica-orange hover:bg-opacity-20 ${selectedColumn === rubricItems.length + 2 ? 'bg-orange-100' : ''}`}
                           onClick={() => {
                             setSelectedColumn(selectedColumn === rubricItems.length + 2 ? null : rubricItems.length + 2);
                             setSelectedRow(null);
@@ -4904,7 +5081,7 @@
                         >
                           Comments
                         </th>
-                        <th className="px-2 py-3 text-center text-xs font-semibold text-pacifica-navy border-b-2 border-pacifica-gray w-16">
+                        <th className="px-2 py-3 text-center text-xs font-semibold text-pacifica-navy border-b-2 border-pacifica-gray w-16 bg-gray-100">
                           <button
                             type="button"
                             onClick={(e) => {
