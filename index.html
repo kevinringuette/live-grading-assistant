@@ -1397,11 +1397,14 @@
 
         console.log(`Saving grade for ${student.name} to Airtable...`);
 
+        // Convert student ID to number for Airtable (SID field is Integer type)
+        const sidNumber = parseInt(student.studentId, 10) || null;
+
         // Build records for each rubric score
         const records = Object.entries(normalizeScoresMap(g.scores)).map(([rubricName, score]) => {
           const record = {
             'Rubric Item Name': rubricName,
-            'SID': student.studentId || student.id,
+            'SID': sidNumber,
             'Assignment': assignmentName,
             'Grade': score,
             'Comments': g.comments || ''
@@ -1416,7 +1419,7 @@
           }
           const rubricItemId = rubricItemIds[rubricName];
           if (rubricItemId) {
-            record['Rubric'] = [rubricItemId];
+            record['Rurbic'] = [rubricItemId]; // Note: field name is misspelled in Airtable
           }
 
           return record;
@@ -1426,7 +1429,7 @@
 
         try {
           await airtableUpsert(
-            CONFIG.TABLES.FINAL_VOICE_GRADES,
+            CONFIG.TABLES.GRADES,
             records,
             ['SID', 'Assignment', 'Rubric Item Name']
           );
