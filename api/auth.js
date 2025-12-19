@@ -68,6 +68,8 @@ module.exports = async (req, res) => {
     // Route: /auth/google - Generate OAuth URL
     if (pathname === '/auth/google' && method === 'GET') {
       const redirectUri = getRedirectUri(req);
+      console.log('[OAuth] Host:', req.headers.host);
+      console.log('[OAuth] Redirect URI:', redirectUri);
       oauth2Client.redirectUri = redirectUri;
 
       const authorizeUrl = oauth2Client.generateAuthUrl({
@@ -80,6 +82,7 @@ module.exports = async (req, res) => {
         redirect_uri: redirectUri
       });
 
+      console.log('[OAuth] Generated URL:', authorizeUrl);
       return res.status(200).json({ url: authorizeUrl });
     }
 
