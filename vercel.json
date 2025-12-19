@@ -1,19 +1,20 @@
 {
-  "version": 2,
-  "builds": [
+  "rewrites": [
     {
-      "src": "server.js",
-      "use": "@vercel/node"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/auth/(.*)",
-      "dest": "/server.js"
+      "source": "/auth/google",
+      "destination": "/api/auth"
     },
     {
-      "src": "/(.*)",
-      "dest": "/$1"
+      "source": "/auth/callback",
+      "destination": "/api/auth"
+    },
+    {
+      "source": "/auth/status",
+      "destination": "/api/auth"
+    },
+    {
+      "source": "/auth/logout",
+      "destination": "/api/auth"
     }
   ]
 }
