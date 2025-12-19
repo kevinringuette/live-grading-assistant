@@ -11,11 +11,19 @@ const PORT = 3000;
 const credentials = JSON.parse(fs.readFileSync('credentials.json', 'utf8'));
 const { client_id, client_secret, redirect_uris } = credentials.web;
 
-// Create OAuth2 client
+// Determine redirect URI based on environment
+const getRedirectUri = (req) => {
+  const host = req.get('host');
+  if (host && host.includes('vercel.app')) {
+    return `https://${host}/auth/callback`;
+  }
+  return 'http://localhost:3000/auth/callback';
+};
+
+// Create OAuth2 client (will update redirect URI per request)
 const oauth2Client = new OAuth2Client(
   client_id,
-  client_secret,
-  redirect_uris[0]
+  client_secret
 );
 
 // Middleware
@@ -24,24 +32,29 @@ app.use(express.static('.')); // Serve static files from current directory
 
 // Session configuration
 app.use(session({
-  secret: 'your-secret-key-change-this-in-production',
+  secret: process.env.SESSION_SECRET || 'your-secret-key-change-this-in-production',
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: false, // Set to true if using HTTPS
-    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    secure: process.env.VERCEL === '1', // Use secure cookies on Vercel (HTTPS)
+    maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    sameSite: 'lax'
   }
 }));
 
 // Generate OAuth URL
 app.get('/auth/google', (req, res) => {
+  const redirectUri = getRedirectUri(req);
+  oauth2Client.redirectUri = redirectUri;
+
   const authorizeUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: [
       'https://www.googleapis.com/auth/userinfo.email',
       'https://www.googleapis.com/auth/userinfo.profile'
     ],
-    prompt: 'select_account'
+    prompt: 'select_account',
+    redirect_uri: redirectUri
   });
   res.json({ url: authorizeUrl });
 });
@@ -55,6 +68,9 @@ app.get('/auth/callback', async (req, res) => {
   }
 
   try {
+    const redirectUri = getRedirectUri(req);
+    oauth2Client.redirectUri = redirectUri;
+
     // Exchange authorization code for tokens
     const { tokens } = await oauth2Client.getToken(code);
     oauth2Client.setCredentials(tokens);
@@ -107,10 +123,15 @@ app.post('/auth/logout', (req, res) => {
   });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-  console.log(`\nTo start the app:`);
-  console.log(`1. Make sure you've run: npm install`);
-  console.log(`2. Visit: http://localhost:${PORT}/index.html`);
-});
+// Start server (only if not on Vercel)
+if (process.env.VERCEL !== '1') {
+  app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`\nTo start the app:`);
+    console.log(`1. Make sure you've run: npm install`);
+    console.log(`2. Visit: http://localhost:${PORT}/index.html`);
+  });
+}
+
+// Export for Vercel serverless functions
+module.exports = app;
