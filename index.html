@@ -1385,17 +1385,18 @@
       };
 
       // Save student grade directly to Airtable (replaces n8n webhook)
-      const saveStudentGradeToAirtable = async (studentId) => {
-        if (!studentId || !grades[studentId]) return;
+      const saveStudentGradeToAirtable = async (studentId, gradeData = null) => {
+        // Use provided gradeData or fall back to state lookup
+        const g = gradeData || grades[studentId];
 
-        const g = grades[studentId];
+        if (!studentId || !g) return;
         // Only save if completed or partially graded
         if (!g.completed && Object.keys(g.scores).length === 0 && !g.comments) return;
 
         const student = students.find(s => s.id === studentId);
         if (!student) return;
 
-        console.log(`Saving grade for ${student.name} to Airtable...`);
+        console.log(`Saving grade for ${student.name} to Airtable...`, { gradeData: g, studentId: student.studentId });
 
         // Convert student ID to number for Airtable (SID field is Integer type)
         const sidNumber = parseInt(student.studentId, 10) || null;
@@ -1425,15 +1426,20 @@
           return record;
         });
 
-        if (records.length === 0) return;
+        if (records.length === 0) {
+          console.log(`No records to save for ${student.name} - no scores found`);
+          return;
+        }
+
+        console.log(`Upserting ${records.length} record(s) to Airtable for ${student.name}:`, records);
 
         try {
-          await airtableUpsert(
+          const result = await airtableUpsert(
             CONFIG.TABLES.GRADES,
             records,
             ['SID', 'Assignment', 'Rubric Item Name']
           );
-          console.log(`Grade saved successfully for ${student.name}`);
+          console.log(`✅ Grade saved successfully for ${student.name}`, result);
         } catch (err) {
           console.error(`Grade save failed for ${student.name}:`, err);
           throw err;
@@ -2611,7 +2617,7 @@
               const student = students.find(s => s.id === studentId);
               if (student) {
                 console.log(`${logPrefix} Syncing grade to Airtable for ${student.name}...`);
-                saveStudentGradeToAirtable(studentId)
+                saveStudentGradeToAirtable(studentId, gradeData)
                   .then(() => console.log(`${logPrefix} ✅ Airtable sync complete for ${student.name}`))
                   .catch(err => console.error(`${logPrefix} ❌ Airtable sync failed for ${student.name}:`, err));
               }
