@@ -3233,8 +3233,9 @@
         }
 
         // Save immediately to Airtable (no debounce delay for manual entry)
+        // Pass gradeData so we use the fresh data, not stale state
         try {
-          await saveStudentGradeToAirtable(studentId);
+          await saveStudentGradeToAirtable(studentId, gradeData);
         } catch (err) {
           console.error("Grade sync error", err);
         }
