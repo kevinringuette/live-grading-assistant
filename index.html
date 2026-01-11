@@ -892,6 +892,7 @@
       const [selectedCell, setSelectedCell] = useState(null); // { row: idx, col: idx }
       const [selectedRow, setSelectedRow] = useState(null);
       const [selectedColumn, setSelectedColumn] = useState(null);
+      const [selectedReviewTab, setSelectedReviewTab] = useState('all'); // 'all' or section ID
       const [editingStudent, setEditingStudent] = useState(null);
       const [editingField, setEditingField] = useState(null);
       const [showManualRubricModal, setShowManualRubricModal] = useState(false);
@@ -3500,6 +3501,13 @@
         });
       }, [students, grades, sortField, sortDirection, rubricItems]);
 
+      const filteredStudentsForReview = useMemo(() => {
+        if (selectedReviewTab === 'all') {
+          return sortedStudentsForResults;
+        }
+        return sortedStudentsForResults.filter(student => student.sectionId === selectedReviewTab);
+      }, [sortedStudentsForResults, selectedReviewTab]);
+
       const completedStudentIds = useMemo(() => {
         return new Set(Object.entries(grades || {}).filter(([_, g]) => g?.completed).map(([id]) => id));
       }, [grades]);
@@ -5410,6 +5418,7 @@
                             setCurrentStudent(null);
                             setError(null);
                             setSelectedEmailStudentIds([]);
+                            setSelectedReviewTab('all');
                             manualTranscriptRequestsRef.current.clear();
                             setManualTranscriptText('');
                             setManualTranscriptError(null);
@@ -5512,12 +5521,68 @@
                 )
               }
 
+              {/* Tabs for filtering by class */}
+              <div className="bg-white rounded-lg shadow-md border border-pacifica-gray mb-4 overflow-x-auto">
+                <div className="flex items-center gap-2 p-4 border-b border-pacifica-gray">
+                  <button
+                    onClick={() => setSelectedReviewTab('all')}
+                    className={`px-4 py-2 rounded-lg font-medium transition-colors whitespace-nowrap ${
+                      selectedReviewTab === 'all'
+                        ? 'bg-pacifica-orange text-white'
+                        : 'bg-pacifica-gray bg-opacity-20 text-pacifica-navy hover:bg-pacifica-orange hover:bg-opacity-20'
+                    }`}
+                  >
+                    All Classes ({students.length})
+                  </button>
+                  {selectedSections.map(section => {
+                    const sectionStudentCount = students.filter(s => s.sectionId === section.id).length;
+                    return (
+                      <button
+                        key={section.id}
+                        onClick={() => setSelectedReviewTab(section.id)}
+                        className={`px-4 py-2 rounded-lg font-medium transition-colors whitespace-nowrap ${
+                          selectedReviewTab === section.id
+                            ? 'bg-pacifica-orange text-white'
+                            : 'bg-pacifica-gray bg-opacity-20 text-pacifica-navy hover:bg-pacifica-orange hover:bg-opacity-20'
+                        }`}
+                      >
+                        {section.name} ({sectionStudentCount})
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
               <div className="bg-white rounded-lg shadow-md border border-pacifica-gray overflow-hidden mb-6">
                 <div className="p-4 bg-gradient-to-r from-pacifica-navy to-pacifica-midnight sticky top-0 z-20" style={{ top: isHeaderCollapsed ? '52px' : '0' }}>
-                  <h2 className="text-lg font-semibold text-white">
-                    Grades Table ({Object.values(grades).filter(g => g.completed).length}/{students.length} graded)
-                  </h2>
-                  <p className="text-xs text-pacifica-gray mt-1">Click any cell to edit • Press Tab/Enter to navigate • Decimals supported</p>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h2 className="text-lg font-semibold text-white">
+                        Grades Table ({filteredStudentsForReview.filter(s => grades[s.id]?.completed).length}/{filteredStudentsForReview.length} graded)
+                      </h2>
+                      <p className="text-xs text-pacifica-gray mt-1">Click any cell to edit • Press Tab/Enter to navigate • Decimals supported</p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        const totals = filteredStudentsForReview.map(student => {
+                          const grade = grades[student.id] || { scores: {}, comments: '', completed: false };
+                          return calculateTotal(grade);
+                        });
+                        const textToCopy = totals.join('\n');
+                        navigator.clipboard.writeText(textToCopy).then(() => {
+                          alert('Final grades copied to clipboard!');
+                        }).catch(err => {
+                          console.error('Failed to copy:', err);
+                          alert('Failed to copy to clipboard');
+                        });
+                      }}
+                      className="px-4 py-2 bg-white text-pacifica-navy rounded-lg hover:bg-pacifica-gray hover:bg-opacity-30 transition-colors font-semibold flex items-center gap-2"
+                      title="Copy final grades to clipboard"
+                    >
+                      <Icon name="Copy" className="w-4 h-4" />
+                      Copy Grades
+                    </button>
+                  </div>
                 </div>
 
                 <div className="overflow-x-auto max-h-[calc(100vh-200px)] overflow-y-auto">
@@ -5589,7 +5654,7 @@
                       </tr>
                     </thead>
                     <tbody>
-                      {sortedStudentsForResults.map((student, rowIdx) => {
+                      {filteredStudentsForReview.map((student, rowIdx) => {
                         const sg = student.grade;
                         const isSelected = selectedCell?.row === rowIdx;
 
