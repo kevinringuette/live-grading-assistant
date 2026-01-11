@@ -35,6 +35,8 @@
             'slide-down': 'slide-down 0.3s ease-out forwards',
             'modal-slide-up': 'modal-slide-up 0.3s ease-out forwards',
             'modal-slide-down': 'modal-slide-down 0.2s ease-in forwards',
+            'modal-slide-left': 'modal-slide-left 0.3s ease-out forwards',
+            'modal-slide-right': 'modal-slide-right 0.2s ease-in forwards',
             'backdrop-fade-in': 'backdrop-fade-in 0.2s ease-out forwards',
             'backdrop-fade-out': 'backdrop-fade-out 0.2s ease-in forwards'
           },
@@ -62,6 +64,14 @@
             'modal-slide-down': {
               '0%': { opacity: '1', transform: 'translateY(0)' },
               '100%': { opacity: '0', transform: 'translateY(100%)' }
+            },
+            'modal-slide-left': {
+              '0%': { transform: 'translateX(-100%)' },
+              '100%': { transform: 'translateX(0)' }
+            },
+            'modal-slide-right': {
+              '0%': { transform: 'translateX(0)' },
+              '100%': { transform: 'translateX(-100%)' }
             },
             'backdrop-fade-in': {
               '0%': { opacity: '0' },
@@ -3216,18 +3226,18 @@
         return () => window.removeEventListener('keydown', handleGlobalKeyDown);
       }, [selectedColumn, students, grades, rubricItems]);
 
-      const syncGradeToN8N = (studentId, gradeData) => {
+      const syncGradeToN8N = async (studentId, gradeData) => {
+        // Clear any pending timeout for this student
         if (gradeSyncTimeouts.current[studentId]) {
           clearTimeout(gradeSyncTimeouts.current[studentId]);
         }
 
-        gradeSyncTimeouts.current[studentId] = setTimeout(async () => {
-          try {
-            await saveStudentGradeToAirtable(studentId);
-          } catch (err) {
-            console.error("Grade sync error", err);
-          }
-        }, 2000);
+        // Save immediately to Airtable (no debounce delay for manual entry)
+        try {
+          await saveStudentGradeToAirtable(studentId);
+        } catch (err) {
+          console.error("Grade sync error", err);
+        }
       };
 
       const updateScore = (studentId, rubricName, value) => {
@@ -4708,11 +4718,18 @@
                       onClick={() => {
                         setCurrentGradingStudentId(s.id);
                         if (!hasAnyPDFs) {
+                          // If modal is already open, just switch student without closing
+                          // If modal is closed, open it with the new student
                           setManualRubricStudent(s);
-                          setShowManualRubricModal(true);
+                          if (!showManualRubricModal) {
+                            setShowManualRubricModal(true);
+                          }
                         }
                       }}
-                      className={`w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-pacifica-orange/10 transition ${done ? 'bg-green-50' : ''}`}
+                      className={`w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-pacifica-orange/10 transition ${
+                        manualRubricStudent?.id === s.id ? 'bg-pacifica-orange/20 border-l-4 border-pacifica-orange' :
+                        done ? 'bg-green-50' : ''
+                      }`}
                     >
                       <span className={`w-5 h-5 inline-flex items-center justify-center rounded-full text-xs font-bold ${done ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-500'}`}>
                         {done ? '✓' : '•'}
@@ -5120,16 +5137,11 @@
 
         const manualRubricModal = showManualRubricModal && manualRubricStudent && (
           <div
-            className={`fixed inset-0 z-50 flex items-end justify-center ${isManualModalClosing ? 'animate-backdrop-fade-out' : 'animate-backdrop-fade-in'}`}
-            onClick={(e) => {
-              if (e.target === e.currentTarget) {
-                closeManualRubricModal();
-              }
-            }}
-            style={{ backgroundColor: 'rgba(0, 0, 0, 0.5)' }}
+            className={`fixed inset-y-0 left-0 z-50 flex ${isManualModalClosing ? 'pointer-events-none' : ''}`}
+            style={{ marginLeft: '320px' }}
           >
             <div
-              className={`bg-white rounded-t-2xl shadow-2xl w-full max-w-4xl max-h-[75vh] flex flex-col ${isManualModalClosing ? 'animate-modal-slide-down' : 'animate-modal-slide-up'}`}
+              className={`bg-white shadow-2xl w-[500px] h-full flex flex-col border-r border-gray-200 ${isManualModalClosing ? 'animate-modal-slide-right' : 'animate-modal-slide-left'}`}
               onClick={(e) => e.stopPropagation()}
             >
               {/* Header */}
