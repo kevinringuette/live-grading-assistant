@@ -958,6 +958,8 @@
       const [emailDraftSuccess, setEmailDraftSuccess] = useState(false);
       const [emailDraftError, setEmailDraftError] = useState(null);
       const [selectedEmailStudentIds, setSelectedEmailStudentIds] = useState([]);
+      const [includeAudioInEmail, setIncludeAudioInEmail] = useState(false);
+      const [emailDraftProgress, setEmailDraftProgress] = useState({ current: 0, total: 0 });
 
       const tableRef = useRef(null);
       const gradeSyncTimeouts = useRef({});
@@ -2317,6 +2319,30 @@
         setSelectedEmailStudentIds([]);
       };
 
+      // Helper: Convert blob to base64
+      const blobToBase64 = (blob) => {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const base64 = reader.result.split(',')[1]; // Remove data:audio/webm;base64, prefix
+            resolve(base64);
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      };
+
+      // Helper: Find audio recordings for a student by name
+      const findAudioForStudent = (studentName) => {
+        if (!studentName || !completedRecordingsRef.current) return [];
+        return completedRecordingsRef.current.filter(recording => {
+          if (!recording.studentName) return false;
+          // Recording studentName can contain multiple names comma-separated
+          const recordingStudents = recording.studentName.split(',').map(s => s.trim().toLowerCase());
+          return recordingStudents.includes(studentName.toLowerCase());
+        });
+      };
+
       const handleDraftEmail = async () => {
         if (!CONFIG.N8N_EMAIL_WEBHOOK_URL || CONFIG.N8N_EMAIL_WEBHOOK_URL.includes('YOUR_N8N_EMAIL_WEBHOOK_URL_HERE')) {
           alert('Please configure your n8n email webhook URL in the CONFIG section.');
@@ -2326,6 +2352,7 @@
         setIsDraftingEmail(true);
         setEmailDraftError(null);
         setEmailDraftSuccess(false);
+        setEmailDraftProgress({ current: 0, total: 0 });
 
         if (selectedEmailStudentIds.length === 0) {
           setEmailDraftError('Select at least one graded student to draft emails.');
@@ -2335,17 +2362,17 @@
 
         try {
           // Build student rows
-        const studentData = students.map(student => {
-          const g = grades[student.id] || { scores: {}, comments: '', completed: false };
-          const total = g.completed
-            ? rubricItems.reduce((sum, item) => sum + (normalizeScoreValue(g.scores[item.name]) || 0), 0)
-            : null;
+          const studentData = students.map(student => {
+            const g = grades[student.id] || { scores: {}, comments: '', completed: false };
+            const total = g.completed
+              ? rubricItems.reduce((sum, item) => sum + (normalizeScoreValue(g.scores[item.name]) || 0), 0)
+              : null;
 
-          const rubricScores = rubricItems.map(item => ({
-            label: item.name,
-            score: normalizeScoreValue(g?.scores?.[item.name]),
-            maxPoints: item.maxPoints
-          }));
+            const rubricScores = rubricItems.map(item => ({
+              label: item.name,
+              score: normalizeScoreValue(g?.scores?.[item.name]),
+              maxPoints: item.maxPoints
+            }));
 
             return {
               recordId: student.id,
@@ -2361,7 +2388,6 @@
             };
           });
 
-          const gradedOnly = studentData.filter(s => s.completed && s.total !== null);
           const selectedStudents = studentData.filter(s => selectedEmailStudentIds.includes(s.recordId));
 
           if (selectedStudents.length === 0) {
@@ -2370,11 +2396,55 @@
             return;
           }
 
+          // If including audio, attach base64 audio to each student
+          let studentsWithAudio = selectedStudents;
+          if (includeAudioInEmail) {
+            studentsWithAudio = await Promise.all(selectedStudents.map(async (student) => {
+              const recordings = findAudioForStudent(student.name);
+              if (recordings.length === 0) {
+                return { ...student, audioAttachments: [] };
+              }
+
+              // Convert all matching recordings to base64
+              const audioAttachments = await Promise.all(recordings.map(async (recording) => {
+                try {
+                  const base64 = await blobToBase64(recording.blob);
+                  return {
+                    base64,
+                    mimeType: 'audio/webm',
+                    duration: recording.duration,
+                    size: recording.size,
+                    timestamp: recording.timestamp,
+                    segmentId: recording.id
+                  };
+                } catch (err) {
+                  console.error(`Failed to convert audio for ${student.name}:`, err);
+                  return null;
+                }
+              }));
+
+              return {
+                ...student,
+                audioAttachments: audioAttachments.filter(a => a !== null)
+              };
+            }));
+          }
+
+          // Batch students into groups of 3
+          const BATCH_SIZE = 3;
+          const batches = [];
+          for (let i = 0; i < studentsWithAudio.length; i += BATCH_SIZE) {
+            batches.push(studentsWithAudio.slice(i, i + BATCH_SIZE));
+          }
+
+          setEmailDraftProgress({ current: 0, total: batches.length });
+
           const averageScore = selectedStudents.length
             ? Math.round(selectedStudents.reduce((acc, s) => acc + s.total, 0) / selectedStudents.length)
             : null;
 
-          const payload = {
+          // Common payload data (without students)
+          const basePayload = {
             teacher: { name: selectedTeacher?.name, email: selectedTeacher?.email },
             assignmentName,
             sections: selectedSections.map(s => ({ id: s.sectionId, name: s.name })),
@@ -2389,7 +2459,6 @@
               maxPoints: rubricItems.map(i => i.maxPoints),
               overallMax: rubricItems.reduce((sum, i) => sum + i.maxPoints, 0)
             },
-            students: selectedStudents,
             allStudents: studentData,
             summary: {
               totalStudents: students.length,
@@ -2397,21 +2466,49 @@
               selectedStudents: selectedStudents.length,
               averageScore
             },
+            includeAudio: includeAudioInEmail,
             timestamp: new Date().toISOString()
           };
 
-          const response = await fetch(CONFIG.N8N_EMAIL_WEBHOOK_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
+          // Send each batch
+          const errors = [];
+          for (let i = 0; i < batches.length; i++) {
+            const batch = batches[i];
+            const payload = {
+              ...basePayload,
+              students: batch,
+              batchInfo: {
+                batchNumber: i + 1,
+                totalBatches: batches.length,
+                studentsInBatch: batch.length,
+                totalSelectedStudents: studentsWithAudio.length
+              }
+            };
 
-          if (!response.ok) {
-            const text = await response.text().catch(() => '');
-            throw new Error(`Failed to send data to n8n (${response.status}): ${text || response.statusText}`);
+            try {
+              const response = await fetch(CONFIG.N8N_EMAIL_WEBHOOK_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+              });
+
+              if (!response.ok) {
+                const text = await response.text().catch(() => '');
+                errors.push(`Batch ${i + 1}: ${response.status} - ${text || response.statusText}`);
+              } else {
+                try { console.log(`Email draft batch ${i + 1} response:`, await response.json()); } catch { }
+              }
+            } catch (err) {
+              errors.push(`Batch ${i + 1}: ${err.message}`);
+            }
+
+            setEmailDraftProgress({ current: i + 1, total: batches.length });
           }
 
-          try { console.log('Email draft response:', await response.json()); } catch { }
+          if (errors.length > 0) {
+            throw new Error(`Some batches failed:\n${errors.join('\n')}`);
+          }
+
           setEmailDraftSuccess(true);
           setTimeout(() => setEmailDraftSuccess(false), 5000);
         } catch (err) {
@@ -2419,6 +2516,7 @@
           setEmailDraftError(err.message || 'Unknown error');
         } finally {
           setIsDraftingEmail(false);
+          setEmailDraftProgress({ current: 0, total: 0 });
         }
       };
 
@@ -5385,6 +5483,24 @@
                       </>
                     )}
 
+                    {/* Audio attachment toggle */}
+                    <label
+                      className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg cursor-pointer hover:bg-gray-100 transition-colors"
+                      title={recordingSegments.length === 0 ? 'No audio recordings available' : 'Include audio recordings in email drafts'}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={includeAudioInEmail}
+                        onChange={(e) => setIncludeAudioInEmail(e.target.checked)}
+                        disabled={recordingSegments.length === 0}
+                        className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500 disabled:opacity-50"
+                      />
+                      <Icon name="Mic" className={`w-4 h-4 ${recordingSegments.length === 0 ? 'text-gray-400' : 'text-gray-600'}`} />
+                      <span className={`text-sm ${recordingSegments.length === 0 ? 'text-gray-400' : 'text-gray-700'}`}>
+                        Include Audio
+                      </span>
+                    </label>
+
                     <button
                       onClick={handleDraftEmail}
                       disabled={isDraftingEmail || completedCount === 0 || !hasSelectedEmailRecipients}
@@ -5393,12 +5509,16 @@
                         ? 'No graded students yet'
                         : !hasSelectedEmailRecipients
                           ? 'Select at least one graded student to draft emails'
-                          : 'Draft emails for selected students'}
+                          : includeAudioInEmail
+                            ? 'Draft emails with audio attachments for selected students'
+                            : 'Draft emails for selected students'}
                     >
                       {isDraftingEmail ? (
                         <>
                           <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-                          Drafting…
+                          {emailDraftProgress.total > 0
+                            ? `Drafting ${emailDraftProgress.current}/${emailDraftProgress.total}…`
+                            : 'Preparing…'}
                         </>
                       ) : (
                         <>
