@@ -3565,6 +3565,17 @@
         return sections.filter(s => s.name.toLowerCase().includes(q) || (s.sectionId || '').toLowerCase().includes(q));
       }, [sections, sectionQuery]);
 
+      // Filter students for name correction modal (moved to top level for hooks rules)
+      const filteredStudentsForNameCorrection = useMemo(() => {
+        const q = nameCorrectionQuery.toLowerCase().trim();
+        if (!q) return students;
+        return students.filter(s =>
+          s.name.toLowerCase().includes(q) ||
+          (s.studentId || '').toString().includes(q) ||
+          (s.email || '').toLowerCase().includes(q)
+        );
+      }, [students, nameCorrectionQuery]);
+
       const teacherAssignments = useMemo(() => {
         if (!selectedTeacher?.id) return [];
         return voiceGraderAssignments.filter(a => {
@@ -5633,17 +5644,6 @@
           setNameCorrectionData(null);
           setNameCorrectionQuery('');
         };
-
-        // Filter students for name correction modal
-        const filteredStudentsForNameCorrection = useMemo(() => {
-          const q = nameCorrectionQuery.toLowerCase().trim();
-          if (!q) return students;
-          return students.filter(s =>
-            s.name.toLowerCase().includes(q) ||
-            (s.studentId || '').toString().includes(q) ||
-            (s.email || '').toLowerCase().includes(q)
-          );
-        }, [students, nameCorrectionQuery]);
 
         const nameCorrectionModal = showNameCorrectionModal && nameCorrectionData && (
           <>
