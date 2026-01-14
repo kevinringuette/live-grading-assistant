@@ -910,6 +910,16 @@
       const [manualRubricStudent, setManualRubricStudent] = useState(null);
       const [isManualModalClosing, setIsManualModalClosing] = useState(false);
 
+      // Name correction modal state - for changing student name after voice grading
+      const [showNameCorrectionModal, setShowNameCorrectionModal] = useState(false);
+      const [nameCorrectionData, setNameCorrectionData] = useState(null);
+      // { entryId, originalStudentId, originalStudentName, gradeData: { scores, comments }, transcriptText }
+      const [nameCorrectionQuery, setNameCorrectionQuery] = useState('');
+
+      // Needs review entries - transcripts that couldn't match a student name
+      // Stored in transcript entries with: needsReview: true, rawTranscript, gradeData
+      const [isResubmittingTranscript, setIsResubmittingTranscript] = useState(false);
+
       // Close manual rubric modal on Escape key
       useEffect(() => {
         const handleEscapeKey = (e) => {
@@ -928,6 +938,22 @@
           return () => window.removeEventListener('keydown', handleEscapeKey);
         }
       }, [showManualRubricModal, isManualModalClosing]);
+
+      // Close name correction modal on Escape key
+      useEffect(() => {
+        const handleEscapeKey = (e) => {
+          if (e.key === 'Escape' && showNameCorrectionModal) {
+            setShowNameCorrectionModal(false);
+            setNameCorrectionData(null);
+            setNameCorrectionQuery('');
+          }
+        };
+
+        if (showNameCorrectionModal) {
+          window.addEventListener('keydown', handleEscapeKey);
+          return () => window.removeEventListener('keydown', handleEscapeKey);
+        }
+      }, [showNameCorrectionModal]);
 
       const [sessionId, setSessionId] = useState(null);
       const [micError, setMicError] = useState(null);
@@ -2534,6 +2560,43 @@
         const headerLabel = durationSeconds ? `${label} (${durationSeconds}s)` : label;
         const logPrefix = chunkNum !== null ? `[Segment ${chunkNum}]` : `[${label}]`;
 
+        // Check if webhook returned raw transcript (indicates name matching failure)
+        // This happens when the webhook can't identify the student name from the audio
+        let rawTranscript = null;
+        let unmatchedGradeData = null;
+
+        // Extract raw transcript from various possible locations in the result
+        if (result && typeof result === 'object') {
+          // Check for transcript at top level or in first array element
+          const checkForTranscript = (obj) => {
+            if (obj?.transcript && typeof obj.transcript === 'string') return obj.transcript;
+            if (obj?.rawTranscript && typeof obj.rawTranscript === 'string') return obj.rawTranscript;
+            if (obj?.audioTranscript && typeof obj.audioTranscript === 'string') return obj.audioTranscript;
+            return null;
+          };
+
+          rawTranscript = checkForTranscript(result);
+          if (!rawTranscript && Array.isArray(result) && result.length > 0) {
+            rawTranscript = checkForTranscript(result[0]);
+          }
+          if (!rawTranscript && result?.data && Array.isArray(result.data) && result.data.length > 0) {
+            rawTranscript = checkForTranscript(result.data[0]);
+          }
+
+          // Check if there's grade data without a matched student (for needs review)
+          const checkForUnmatchedGrade = (obj) => {
+            if (obj?.scores && !obj?.studentName && !obj?.studentId) {
+              return { scores: obj.scores, comments: obj.comments || '' };
+            }
+            return null;
+          };
+
+          unmatchedGradeData = checkForUnmatchedGrade(result);
+          if (!unmatchedGradeData && Array.isArray(result) && result.length > 0) {
+            unmatchedGradeData = checkForUnmatchedGrade(result[0]);
+          }
+        }
+
         const studentsData = normalizeWebhookResult(result, logPrefix);
 
         if (studentsData.length > 0) {
@@ -2541,6 +2604,7 @@
           let matchedStudents = [];
           let gradeUpdates = {};
           let studentIdsToMove = [];
+          let matchedGradesForEntry = []; // Track matched grades for name correction feature
 
           studentsData.forEach((studentResult, idx) => {
             console.log(`${logPrefix} Processing student ${idx + 1}/${studentsData.length}:`, studentResult.studentName, 'ID:', studentResult.studentId);
@@ -2582,6 +2646,16 @@
                   comments: normalizedComments,
                   completed: true
                 };
+
+                // Track for name correction feature
+                matchedGradesForEntry.push({
+                  studentId: student.id,
+                  studentName: student.name,
+                  gradeData: {
+                    scores: normalizeScoresMap(studentResult.scores),
+                    comments: normalizedComments
+                  }
+                });
 
                 console.log(`${logPrefix} ✅ Prepared grade for ${student.name}`, normalizedScores);
               } else {
@@ -2645,13 +2719,21 @@
               const combinedText = appendTranscript && existing
                 ? `${existing.text}\n${formattedText}`
                 : formattedText;
+              // Merge existing matched grades if appending
+              const existingMatchedGrades = appendTranscript && existing?.matchedGrades
+                ? existing.matchedGrades
+                : [];
+              const mergedMatchedGrades = [...existingMatchedGrades, ...matchedGradesForEntry];
               return [
                 {
                   id: entryId,
                   text: combinedText,
                   isProcessing: entryProcessingState !== 'complete',
                   segmentNumber: chunkNum,
-                  timestamp: new Date().toLocaleTimeString()
+                  timestamp: new Date().toLocaleTimeString(),
+                  // Store matched grades for name correction feature
+                  matchedGrades: mergedMatchedGrades,
+                  rawTranscript: rawTranscript || existing?.rawTranscript || null
                 },
                 ...filtered
               ];
@@ -2674,10 +2756,14 @@
 
             console.log(`${logPrefix} ===== SUMMARY: ${matchedStudents.length}/${studentsData.length} students matched and graded =====`);
           } else {
+            // No students matched - check if this needs review (has raw transcript)
+            const needsReview = !!rawTranscript || !!unmatchedGradeData;
             setTranscript(prev => {
               const filtered = prev.filter(e => e.id !== entryId);
               const existing = prev.find(e => e.id === entryId);
-              const baseText = `📍 ${label} - No students matched`;
+              const baseText = needsReview
+                ? `📍 ${label} - ⚠️ Needs Review (couldn't match student name)`
+                : `📍 ${label} - No students matched`;
               const combinedText = appendTranscript && existing
                 ? `${existing.text}\n${baseText}`
                 : baseText;
@@ -2687,7 +2773,11 @@
                   text: combinedText,
                   isProcessing: entryProcessingState !== 'complete',
                   segmentNumber: chunkNum,
-                  timestamp: new Date().toLocaleTimeString()
+                  timestamp: new Date().toLocaleTimeString(),
+                  // Mark as needs review if we have transcript but no match
+                  needsReview: needsReview,
+                  rawTranscript: rawTranscript || existing?.rawTranscript || null,
+                  unmatchedGradeData: unmatchedGradeData || existing?.unmatchedGradeData || null
                 },
                 ...filtered
               ];
@@ -2698,12 +2788,21 @@
                 seg.id === segmentId ? { ...seg, status: 'no-match' } : seg
               ));
             }
+
+            if (needsReview) {
+              console.log(`${logPrefix} ⚠️ NEEDS REVIEW: Has transcript but couldn't match student name`);
+              console.log(`${logPrefix} Raw transcript:`, rawTranscript);
+            }
           }
         } else {
+          // No students data at all - check if webhook returned raw transcript (needs review)
+          const needsReview = !!rawTranscript || !!unmatchedGradeData;
           setTranscript(prev => {
             const filtered = prev.filter(e => e.id !== entryId);
             const existing = prev.find(e => e.id === entryId);
-            const baseText = `📍 ${label} - Processed without grade data`;
+            const baseText = needsReview
+              ? `📍 ${label} - ⚠️ Needs Review (couldn't match student name)`
+              : `📍 ${label} - Processed without grade data`;
             const combinedText = appendTranscript && existing
               ? `${existing.text}\n${baseText}`
               : baseText;
@@ -2713,7 +2812,10 @@
                 text: combinedText,
                 isProcessing: entryProcessingState !== 'complete',
                 segmentNumber: chunkNum,
-                timestamp: new Date().toLocaleTimeString()
+                timestamp: new Date().toLocaleTimeString(),
+                needsReview: needsReview,
+                rawTranscript: rawTranscript || existing?.rawTranscript || null,
+                unmatchedGradeData: unmatchedGradeData || existing?.unmatchedGradeData || null
               },
               ...filtered
             ];
@@ -2721,11 +2823,16 @@
 
           if (segmentId) {
             setRecordingSegments(prev => prev.map(seg =>
-              seg.id === segmentId ? { ...seg, status: 'completed' } : seg
+              seg.id === segmentId ? { ...seg, status: needsReview ? 'needs-review' : 'completed' } : seg
             ));
           }
 
-          console.log(`${logPrefix} Processed without grade data`);
+          if (needsReview) {
+            console.log(`${logPrefix} ⚠️ NEEDS REVIEW: Has transcript but no grade data`);
+            console.log(`${logPrefix} Raw transcript:`, rawTranscript);
+          } else {
+            console.log(`${logPrefix} Processed without grade data`);
+          }
         }
       };
 
@@ -4542,13 +4649,86 @@
                           key={entry.id}
                           className={`p-3 rounded-lg border ${entry.isProcessing
                             ? 'bg-pacifica-canary bg-opacity-10 border-pacifica-canary animate-pulse'
-                            : 'bg-white border-pacifica-gray'
+                            : entry.needsReview
+                              ? 'bg-amber-50 border-amber-400'
+                              : 'bg-white border-pacifica-gray'
                             }`}
                         >
                           {entry.timestamp && (
                             <div className="text-xs text-pacifica-slate mb-1 font-mono">{entry.timestamp}</div>
                           )}
-                          <p className="text-pacifica-navy whitespace-pre-line leading-relaxed">{entry.text}</p>
+
+                          {/* Render matched grades with clickable student names */}
+                          {entry.matchedGrades && entry.matchedGrades.length > 0 ? (
+                            <div className="space-y-1">
+                              {/* Header line */}
+                              <p className="text-pacifica-navy font-medium">
+                                {entry.text.split('\n')[0]}
+                              </p>
+                              {/* Clickable student entries */}
+                              {entry.matchedGrades.map((mg, idx) => (
+                                <div key={idx} className="flex items-center gap-2 pl-4">
+                                  <span className="text-pacifica-slate">•</span>
+                                  <button
+                                    onClick={() => {
+                                      setNameCorrectionData({
+                                        entryId: entry.id,
+                                        originalStudentId: mg.studentId,
+                                        originalStudentName: mg.studentName,
+                                        gradeData: mg.gradeData,
+                                        transcriptText: entry.rawTranscript
+                                      });
+                                      setNameCorrectionQuery('');
+                                      setShowNameCorrectionModal(true);
+                                    }}
+                                    className="text-pacifica-navy hover:text-pacifica-orange hover:underline font-medium cursor-pointer transition-colors"
+                                    title="Click to change student name"
+                                  >
+                                    {mg.studentName}
+                                  </button>
+                                  <span className="text-pacifica-slate text-xs">
+                                    ({Object.entries(mg.gradeData.scores).map(([k, v]) => `${k}: ${v}`).join(', ')})
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-pacifica-navy whitespace-pre-line leading-relaxed">{entry.text}</p>
+                          )}
+
+                          {/* Needs Review button for unmatched transcripts */}
+                          {entry.needsReview && !entry.isProcessing && (
+                            <div className="mt-3 pt-3 border-t border-amber-200">
+                              <div className="flex items-center justify-between">
+                                <div className="text-xs text-amber-700">
+                                  <span className="font-medium">⚠️ Couldn't identify student name</span>
+                                  {entry.rawTranscript && (
+                                    <p className="mt-1 text-amber-600 italic truncate max-w-xs">
+                                      "{entry.rawTranscript.substring(0, 100)}{entry.rawTranscript.length > 100 ? '...' : ''}"
+                                    </p>
+                                  )}
+                                </div>
+                                <button
+                                  onClick={() => {
+                                    setNameCorrectionData({
+                                      entryId: entry.id,
+                                      originalStudentId: null,
+                                      originalStudentName: null,
+                                      gradeData: entry.unmatchedGradeData || null,
+                                      transcriptText: entry.rawTranscript,
+                                      isNeedsReview: true
+                                    });
+                                    setNameCorrectionQuery('');
+                                    setShowNameCorrectionModal(true);
+                                  }}
+                                  className="px-3 py-1.5 bg-amber-500 text-white text-xs font-medium rounded hover:bg-amber-600 transition-colors flex items-center gap-1"
+                                >
+                                  <Icon name="UserPlus" className="w-3 h-3" />
+                                  Select Student
+                                </button>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       ))
                     )}
@@ -5308,11 +5488,284 @@
           </>
         );
 
+        // Handle changing student name for voice graded entry
+        const handleNameCorrection = async (newStudentId) => {
+          if (!nameCorrectionData || !newStudentId) return;
+
+          const newStudent = students.find(s => s.id === newStudentId);
+          if (!newStudent) return;
+
+          const { entryId, originalStudentId, gradeData, isNeedsReview, transcriptText } = nameCorrectionData;
+
+          // If this is a "needs review" entry with transcript, resend to webhook with student suggestion
+          if (isNeedsReview && transcriptText) {
+            setIsResubmittingTranscript(true);
+
+            try {
+              const roster = students.map(s => ({
+                id: s.id,
+                studentId: s.studentId,
+                name: s.name,
+                email: s.email
+              }));
+
+              const payload = {
+                transcript: {
+                  text: transcriptText,
+                  requestId: `resubmit-${Date.now()}`
+                },
+                student_suggestion: newStudent.name,
+                session: {
+                  id: sessionId || '',
+                  assignment: assignmentName || '',
+                  teacherName: selectedTeacher?.name || '',
+                  teacherEmail: selectedTeacher?.email || '',
+                  teacherId: selectedTeacher?.id || '',
+                  sections: selectedSections.map(s => ({ name: s.name, id: s.id }))
+                },
+                rubric: rubricItems,
+                roster
+              };
+
+              console.log('[Name Correction] Resubmitting transcript with student suggestion:', newStudent.name);
+
+              const response = await fetchWithTimeout(CONFIG.N8N_TRANSCRIPT_WEBHOOK_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+              }, WEBHOOK_TIMEOUT_MS);
+
+              if (response.ok) {
+                console.log('[Name Correction] Transcript resubmitted successfully');
+                // Update the transcript entry to show it's being reprocessed
+                setTranscript(prev => prev.map(entry =>
+                  entry.id === entryId
+                    ? {
+                        ...entry,
+                        text: `⏳ Reprocessing with student: ${newStudent.name}...`,
+                        isProcessing: true,
+                        needsReview: false
+                      }
+                    : entry
+                ));
+              } else {
+                console.error('[Name Correction] Failed to resubmit transcript');
+              }
+            } catch (err) {
+              console.error('[Name Correction] Error resubmitting transcript:', err);
+            } finally {
+              setIsResubmittingTranscript(false);
+            }
+          } else if (gradeData) {
+            // Transfer grade from original student to new student
+            const normalizedScores = normalizeScoresMap(gradeData.scores);
+            const newGradeData = {
+              scores: normalizedScores,
+              comments: gradeData.comments || '',
+              completed: true
+            };
+
+            // Clear grade from original student if exists
+            if (originalStudentId && originalStudentId !== newStudentId) {
+              setGrades(prev => {
+                const updated = { ...prev };
+                // Remove from original student
+                if (updated[originalStudentId]) {
+                  delete updated[originalStudentId];
+                }
+                // Add to new student
+                updated[newStudentId] = newGradeData;
+                return updated;
+              });
+
+              // Clear Airtable records for original student (by saving empty grade)
+              // Actually, we should just save the new student's grade
+              console.log(`[Name Correction] Transferred grade from ${nameCorrectionData.originalStudentName} to ${newStudent.name}`);
+            } else {
+              // Just add to new student (no original to remove)
+              setGrades(prev => ({
+                ...prev,
+                [newStudentId]: newGradeData
+              }));
+            }
+
+            // Save to Airtable
+            saveStudentGradeToAirtable(newStudentId, newGradeData)
+              .then(() => console.log(`[Name Correction] Saved grade to Airtable for ${newStudent.name}`))
+              .catch(err => console.error('[Name Correction] Failed to save grade:', err));
+
+            // Update transcript entry to show new student name
+            setTranscript(prev => prev.map(entry => {
+              if (entry.id !== entryId) return entry;
+
+              // Update matchedGrades array
+              const updatedMatchedGrades = entry.matchedGrades?.map(mg =>
+                mg.studentId === originalStudentId
+                  ? { ...mg, studentId: newStudentId, studentName: newStudent.name }
+                  : mg
+              ) || [];
+
+              // If this was a needs review entry, add the new matched grade
+              if (entry.needsReview && !entry.matchedGrades?.length) {
+                updatedMatchedGrades.push({
+                  studentId: newStudentId,
+                  studentName: newStudent.name,
+                  gradeData: newGradeData
+                });
+              }
+
+              // Rebuild text to reflect new student name
+              const headerLine = entry.text.split('\n')[0].replace('⚠️ Needs Review (couldn\'t match student name)', '');
+              const scoresText = Object.entries(normalizedScores).map(([k, v]) => `${k} ${v}`).join(', ');
+              const newText = `${headerLine.trim()}\n  • ${newStudent.name}. ${scoresText}${newGradeData.comments ? `. ${newGradeData.comments}` : ''}`;
+
+              return {
+                ...entry,
+                text: newText,
+                matchedGrades: updatedMatchedGrades,
+                needsReview: false
+              };
+            }));
+          }
+
+          // Close modal
+          setShowNameCorrectionModal(false);
+          setNameCorrectionData(null);
+          setNameCorrectionQuery('');
+        };
+
+        // Filter students for name correction modal
+        const filteredStudentsForNameCorrection = useMemo(() => {
+          const q = nameCorrectionQuery.toLowerCase().trim();
+          if (!q) return students;
+          return students.filter(s =>
+            s.name.toLowerCase().includes(q) ||
+            (s.studentId || '').toString().includes(q) ||
+            (s.email || '').toLowerCase().includes(q)
+          );
+        }, [students, nameCorrectionQuery]);
+
+        const nameCorrectionModal = showNameCorrectionModal && nameCorrectionData && (
+          <>
+            {/* Backdrop */}
+            <div
+              className="fixed inset-0 bg-black bg-opacity-50 z-50"
+              onClick={() => {
+                setShowNameCorrectionModal(false);
+                setNameCorrectionData(null);
+                setNameCorrectionQuery('');
+              }}
+            />
+            {/* Modal */}
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+              <div
+                className="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[80vh] flex flex-col"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {/* Header */}
+                <div className="px-6 py-4 border-b border-gray-200">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h2 className="text-lg font-bold text-pacifica-navy">
+                        {nameCorrectionData.isNeedsReview ? 'Select Student' : 'Change Student'}
+                      </h2>
+                      {nameCorrectionData.originalStudentName && (
+                        <p className="text-sm text-pacifica-slate">
+                          Current: <span className="font-medium">{nameCorrectionData.originalStudentName}</span>
+                        </p>
+                      )}
+                      {nameCorrectionData.transcriptText && (
+                        <p className="text-xs text-amber-600 mt-1 truncate max-w-[300px]">
+                          Transcript: "{nameCorrectionData.transcriptText.substring(0, 50)}..."
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => {
+                        setShowNameCorrectionModal(false);
+                        setNameCorrectionData(null);
+                        setNameCorrectionQuery('');
+                      }}
+                      className="p-2 rounded-full hover:bg-gray-100 transition-colors"
+                    >
+                      <Icon name="X" className="w-5 h-5 text-gray-500" />
+                    </button>
+                  </div>
+
+                  {/* Search */}
+                  <div className="mt-3 relative">
+                    <Icon name="Search" className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                    <input
+                      type="text"
+                      value={nameCorrectionQuery}
+                      onChange={(e) => setNameCorrectionQuery(e.target.value)}
+                      placeholder="Search students..."
+                      className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-pacifica-orange focus:border-pacifica-orange focus:outline-none"
+                      autoFocus
+                    />
+                  </div>
+                </div>
+
+                {/* Student List */}
+                <div className="flex-1 overflow-y-auto p-2">
+                  {filteredStudentsForNameCorrection.length === 0 ? (
+                    <p className="text-center text-pacifica-slate py-8">No students found</p>
+                  ) : (
+                    filteredStudentsForNameCorrection.map((student) => {
+                      const isOriginal = student.id === nameCorrectionData.originalStudentId;
+                      const isGraded = grades[student.id]?.completed;
+                      return (
+                        <button
+                          key={student.id}
+                          onClick={() => handleNameCorrection(student.id)}
+                          disabled={isResubmittingTranscript}
+                          className={`w-full text-left px-4 py-3 rounded-lg mb-1 transition-colors flex items-center gap-3 ${
+                            isOriginal
+                              ? 'bg-pacifica-orange/10 border-2 border-pacifica-orange'
+                              : 'hover:bg-gray-100 border border-transparent'
+                          } ${isResubmittingTranscript ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        >
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold ${
+                            isGraded ? 'bg-green-100 text-green-700' : 'bg-pacifica-gray/20 text-pacifica-navy'
+                          }`}>
+                            {getInitials(student.name)}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-medium text-pacifica-navy truncate">{student.name}</p>
+                            <p className="text-xs text-pacifica-slate">ID: {student.studentId}</p>
+                          </div>
+                          {isOriginal && (
+                            <span className="text-xs bg-pacifica-orange text-white px-2 py-0.5 rounded">Current</span>
+                          )}
+                          {isGraded && !isOriginal && (
+                            <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded">Graded</span>
+                          )}
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+
+                {/* Footer info */}
+                {isResubmittingTranscript && (
+                  <div className="px-6 py-3 bg-amber-50 border-t border-amber-200">
+                    <p className="text-sm text-amber-700 text-center">
+                      <Icon name="Loader" className="w-4 h-4 inline-block animate-spin mr-2" />
+                      Reprocessing transcript...
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </>
+        );
+
         return (
           <div className="flex h-screen overflow-hidden bg-gray-100">
             {gradingSidebar}
             {gradingContent}
             {manualRubricModal}
+            {nameCorrectionModal}
           </div>
         );
       }
