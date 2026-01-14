@@ -4667,7 +4667,18 @@
                     {transcript.length === 0 ? (
                       <p className="text-pacifica-gray italic">{isRecording ? 'Press SPACEBAR to process...' : 'Start recording'}</p>
                     ) : (
-                      transcript.map((entry) => (
+                      transcript.map((entry) => {
+                        // Debug logging for needsReview entries
+                        if (entry.needsReview || entry.rawTranscript) {
+                          console.log('[Render] Entry with needsReview/rawTranscript:', {
+                            id: entry.id,
+                            needsReview: entry.needsReview,
+                            isProcessing: entry.isProcessing,
+                            rawTranscript: entry.rawTranscript?.substring(0, 50),
+                            text: entry.text?.substring(0, 50)
+                          });
+                        }
+                        return (
                         <div
                           key={entry.id}
                           className={`p-3 rounded-lg border ${entry.isProcessing
@@ -4753,7 +4764,8 @@
                             </div>
                           )}
                         </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
                 </div>
