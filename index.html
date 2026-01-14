@@ -2567,11 +2567,18 @@
 
         // Extract raw transcript from various possible locations in the result
         if (result && typeof result === 'object') {
-          // Check for transcript at top level or in first array element
+          // Check for transcript at top level or in nested locations
           const checkForTranscript = (obj) => {
             if (obj?.transcript && typeof obj.transcript === 'string') return obj.transcript;
             if (obj?.rawTranscript && typeof obj.rawTranscript === 'string') return obj.rawTranscript;
             if (obj?.audioTranscript && typeof obj.audioTranscript === 'string') return obj.audioTranscript;
+            // Check nested message.content structure (n8n OpenAI response format)
+            if (obj?.message?.content?.transcript && typeof obj.message.content.transcript === 'string') {
+              return obj.message.content.transcript;
+            }
+            if (obj?.content?.transcript && typeof obj.content.transcript === 'string') {
+              return obj.content.transcript;
+            }
             return null;
           };
 
@@ -2594,6 +2601,11 @@
           unmatchedGradeData = checkForUnmatchedGrade(result);
           if (!unmatchedGradeData && Array.isArray(result) && result.length > 0) {
             unmatchedGradeData = checkForUnmatchedGrade(result[0]);
+          }
+
+          // Log for debugging
+          if (rawTranscript) {
+            console.log(`[Webhook] Found raw transcript (needs review):`, rawTranscript.substring(0, 100));
           }
         }
 
