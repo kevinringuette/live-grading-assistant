@@ -5689,6 +5689,23 @@
 
           // If this is a "needs review" entry with transcript, resend to webhook with student suggestion
           if (isNeedsReview && transcriptText) {
+            // Close modal and show processing state immediately
+            setShowNameCorrectionModal(false);
+            setNameCorrectionData(null);
+            setNameCorrectionQuery('');
+
+            // Update the transcript entry to show it's being reprocessed
+            setTranscript(prev => prev.map(entry =>
+              entry.id === entryId
+                ? {
+                    ...entry,
+                    text: `⏳ Reprocessing with student: ${newStudent.name}...`,
+                    isProcessing: true,
+                    needsReview: false
+                  }
+                : entry
+            ));
+
             setIsResubmittingTranscript(true);
 
             try {
@@ -5729,18 +5746,6 @@
                 const result = await response.json();
                 console.log('[Name Correction] Transcript resubmitted successfully, result:', result);
 
-                // Update the transcript entry to show it's being reprocessed
-                setTranscript(prev => prev.map(entry =>
-                  entry.id === entryId
-                    ? {
-                        ...entry,
-                        text: `⏳ Reprocessing with student: ${newStudent.name}...`,
-                        isProcessing: true,
-                        needsReview: false
-                      }
-                    : entry
-                ));
-
                 // Process the webhook response
                 handleWebhookSuccess({
                   result,
@@ -5768,6 +5773,9 @@
             } finally {
               setIsResubmittingTranscript(false);
             }
+
+            // Modal already closed, exit early
+            return;
           } else if (gradeData) {
             // Transfer grade from original student to new student
             const normalizedScores = normalizeScoresMap(gradeData.scores);
