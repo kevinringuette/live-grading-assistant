@@ -2725,6 +2725,8 @@
           if (transcriptLines.length > 0) {
             const formattedText = `📍 ${headerLabel}\n${transcriptLines.map(line => `  • ${line}`).join('\n')}`;
 
+            console.log(`${logPrefix} matchedGradesForEntry has ${matchedGradesForEntry.length} entries:`, matchedGradesForEntry.map(mg => mg.studentName));
+
             setTranscript(prev => {
               const filtered = prev.filter(e => e.id !== entryId);
               const existing = prev.find(e => e.id === entryId);
@@ -2736,6 +2738,7 @@
                 ? existing.matchedGrades
                 : [];
               const mergedMatchedGrades = [...existingMatchedGrades, ...matchedGradesForEntry];
+              console.log(`${logPrefix} Creating transcript entry with ${mergedMatchedGrades.length} matchedGrades, entryId=${entryId}`);
               return [
                 {
                   id: entryId,
@@ -4671,12 +4674,13 @@
                       <p className="text-pacifica-gray italic">{isRecording ? 'Press SPACEBAR to process...' : 'Start recording'}</p>
                     ) : (
                       transcript.map((entry) => {
-                        // Debug logging for needsReview entries
-                        if (entry.needsReview || entry.rawTranscript) {
-                          console.log('[Render] Entry with needsReview/rawTranscript:', {
+                        // Debug logging for entries with special properties
+                        if (entry.needsReview || entry.rawTranscript || entry.matchedGrades?.length > 0) {
+                          console.log('[Render] Entry:', {
                             id: entry.id,
                             needsReview: entry.needsReview,
                             isProcessing: entry.isProcessing,
+                            matchedGradesCount: entry.matchedGrades?.length || 0,
                             rawTranscript: entry.rawTranscript?.substring(0, 50),
                             text: entry.text?.substring(0, 50)
                           });
