@@ -2565,33 +2565,64 @@
         let rawTranscript = null;
         let unmatchedGradeData = null;
 
+        // Enhanced debugging: Log the full webhook response structure
+        console.log(`${logPrefix} ===== WEBHOOK RESPONSE DEBUG =====`);
+        console.log(`${logPrefix} Response type:`, typeof result);
+        console.log(`${logPrefix} Response is array:`, Array.isArray(result));
+        if (result) {
+          console.log(`${logPrefix} Response keys:`, Object.keys(result));
+          console.log(`${logPrefix} Full response (first 500 chars):`, JSON.stringify(result).substring(0, 500));
+        }
+
         // Extract raw transcript from various possible locations in the result
         if (result && typeof result === 'object') {
           // Check for transcript at top level or in nested locations
           const checkForTranscript = (obj) => {
+            if (!obj || typeof obj !== 'object') return null;
+
+            // Check all possible transcript field names
             if (obj?.transcript && typeof obj.transcript === 'string') return obj.transcript;
             if (obj?.rawTranscript && typeof obj.rawTranscript === 'string') return obj.rawTranscript;
             if (obj?.audioTranscript && typeof obj.audioTranscript === 'string') return obj.audioTranscript;
+            if (obj?.text && typeof obj.text === 'string') return obj.text;
+
             // Check nested message.content structure (n8n OpenAI response format)
             if (obj?.message?.content?.transcript && typeof obj.message.content.transcript === 'string') {
               return obj.message.content.transcript;
             }
+            if (obj?.message?.content?.text && typeof obj.message.content.text === 'string') {
+              return obj.message.content.text;
+            }
             if (obj?.content?.transcript && typeof obj.content.transcript === 'string') {
               return obj.content.transcript;
             }
+            if (obj?.content?.text && typeof obj.content.text === 'string') {
+              return obj.content.text;
+            }
+
+            // Check for data wrapper
+            if (obj?.data?.transcript && typeof obj.data.transcript === 'string') {
+              return obj.data.transcript;
+            }
+
             return null;
           };
 
           rawTranscript = checkForTranscript(result);
+          console.log(`${logPrefix} Transcript from top level:`, rawTranscript ? rawTranscript.substring(0, 50) + '...' : 'null');
+
           if (!rawTranscript && Array.isArray(result) && result.length > 0) {
             rawTranscript = checkForTranscript(result[0]);
+            console.log(`${logPrefix} Transcript from result[0]:`, rawTranscript ? rawTranscript.substring(0, 50) + '...' : 'null');
           }
           if (!rawTranscript && result?.data && Array.isArray(result.data) && result.data.length > 0) {
             rawTranscript = checkForTranscript(result.data[0]);
+            console.log(`${logPrefix} Transcript from result.data[0]:`, rawTranscript ? rawTranscript.substring(0, 50) + '...' : 'null');
           }
 
           // Check if there's grade data without a matched student (for needs review)
           const checkForUnmatchedGrade = (obj) => {
+            if (!obj || typeof obj !== 'object') return null;
             if (obj?.scores && !obj?.studentName && !obj?.studentId) {
               return { scores: obj.scores, comments: obj.comments || '' };
             }
@@ -2602,14 +2633,24 @@
           if (!unmatchedGradeData && Array.isArray(result) && result.length > 0) {
             unmatchedGradeData = checkForUnmatchedGrade(result[0]);
           }
+          if (!unmatchedGradeData && result?.data && Array.isArray(result.data) && result.data.length > 0) {
+            unmatchedGradeData = checkForUnmatchedGrade(result.data[0]);
+          }
 
-          // Log for debugging
+          // Log what we found
+          console.log(`${logPrefix} Raw transcript found:`, !!rawTranscript);
+          console.log(`${logPrefix} Unmatched grade data found:`, !!unmatchedGradeData);
           if (rawTranscript) {
-            console.log(`[Webhook] Found raw transcript (needs review):`, rawTranscript.substring(0, 100));
+            console.log(`${logPrefix} Raw transcript preview:`, rawTranscript.substring(0, 100));
+          }
+          if (unmatchedGradeData) {
+            console.log(`${logPrefix} Unmatched grade data:`, unmatchedGradeData);
           }
         }
 
         const studentsData = normalizeWebhookResult(result, logPrefix);
+        console.log(`${logPrefix} studentsData.length:`, studentsData.length);
+        console.log(`${logPrefix} studentsData:`, studentsData);
 
         if (studentsData.length > 0) {
           let transcriptLines = [];
@@ -2617,63 +2658,70 @@
           let gradeUpdates = {};
           let studentIdsToMove = [];
           let matchedGradesForEntry = []; // Track matched grades for name correction feature
+          let invalidEntriesCount = 0; // Track entries without valid studentName or scores
 
           studentsData.forEach((studentResult, idx) => {
             console.log(`${logPrefix} Processing student ${idx + 1}/${studentsData.length}:`, studentResult.studentName, 'ID:', studentResult.studentId);
 
-            if (studentResult.studentName && studentResult.scores) {
-              let student = null;
+            // Check if this entry is invalid (missing studentName or scores)
+            if (!studentResult.studentName || !studentResult.scores) {
+              console.log(`${logPrefix}   ⚠️ Invalid entry - missing studentName or scores:`, studentResult);
+              invalidEntriesCount++;
+              return; // Skip this entry
+            }
 
-              if (studentResult.studentId) {
-                student = students.find(s => String(s.studentId) === String(studentResult.studentId)) ||
-                  students.find(s => s.id === studentResult.studentId);
-                if (student) {
-                  console.log(`${logPrefix}   ✓ Matched by ID: ${student.name}`);
-                } else {
-                  console.log(`${logPrefix}   ✗ No match by ID ${studentResult.studentId}`);
-                  console.log(`${logPrefix}   Available IDs:`, students.slice(0, 5).map(s => `${s.name}: ${s.studentId}`));
-                }
-              }
+            // At this point, we know studentResult has both studentName and scores
+            let student = null;
 
-              if (!student && studentResult.studentName) {
-                const target = String(studentResult.studentName).trim().toLowerCase();
-                student = students.find(s => (s.name || '').trim().toLowerCase() === target);
-                if (student) {
-                  console.log(`${logPrefix}   ✓ Matched by name: ${student.name}`);
-                } else {
-                  console.log(`${logPrefix}   ✗ No match by name "${studentResult.studentName}"`);
-                }
-              }
-
+            if (studentResult.studentId) {
+              student = students.find(s => String(s.studentId) === String(studentResult.studentId)) ||
+                students.find(s => s.id === studentResult.studentId);
               if (student) {
-                const normalizedScores = normalizeScoresMap(studentResult.scores);
-                const line = `${student.name}. ${Object.entries(normalizedScores).map(([k, v]) => `${k} ${v}`).join(', ')}${studentResult.comments ? `. ${studentResult.comments}` : ''}`;
-                transcriptLines.push(line);
-                matchedStudents.push(student.name);
-                studentIdsToMove.push(student.id);
-
-                const normalizedComments = typeof studentResult.comments === 'string' ? studentResult.comments : '';
-                gradeUpdates[student.id] = {
-                  scores: normalizeScoresMap(studentResult.scores),
-                  comments: normalizedComments,
-                  completed: true
-                };
-
-                // Track for name correction feature
-                matchedGradesForEntry.push({
-                  studentId: student.id,
-                  studentName: student.name,
-                  gradeData: {
-                    scores: normalizeScoresMap(studentResult.scores),
-                    comments: normalizedComments
-                  }
-                });
-
-                console.log(`${logPrefix} ✅ Prepared grade for ${student.name}`, normalizedScores);
+                console.log(`${logPrefix}   ✓ Matched by ID: ${student.name}`);
               } else {
-                transcriptLines.push(`${studentResult.studentName} (no match in roster)`);
-                console.log(`${logPrefix} ❌ Student not in roster: ${studentResult.studentName}`);
+                console.log(`${logPrefix}   ✗ No match by ID ${studentResult.studentId}`);
+                console.log(`${logPrefix}   Available IDs:`, students.slice(0, 5).map(s => `${s.name}: ${s.studentId}`));
               }
+            }
+
+            if (!student && studentResult.studentName) {
+              const target = String(studentResult.studentName).trim().toLowerCase();
+              student = students.find(s => (s.name || '').trim().toLowerCase() === target);
+              if (student) {
+                console.log(`${logPrefix}   ✓ Matched by name: ${student.name}`);
+              } else {
+                console.log(`${logPrefix}   ✗ No match by name "${studentResult.studentName}"`);
+              }
+            }
+
+            if (student) {
+              const normalizedScores = normalizeScoresMap(studentResult.scores);
+              const line = `${student.name}. ${Object.entries(normalizedScores).map(([k, v]) => `${k} ${v}`).join(', ')}${studentResult.comments ? `. ${studentResult.comments}` : ''}`;
+              transcriptLines.push(line);
+              matchedStudents.push(student.name);
+              studentIdsToMove.push(student.id);
+
+              const normalizedComments = typeof studentResult.comments === 'string' ? studentResult.comments : '';
+              gradeUpdates[student.id] = {
+                scores: normalizeScoresMap(studentResult.scores),
+                comments: normalizedComments,
+                completed: true
+              };
+
+              // Track for name correction feature
+              matchedGradesForEntry.push({
+                studentId: student.id,
+                studentName: student.name,
+                gradeData: {
+                  scores: normalizeScoresMap(studentResult.scores),
+                  comments: normalizedComments
+                }
+              });
+
+              console.log(`${logPrefix} ✅ Prepared grade for ${student.name}`, normalizedScores);
+            } else {
+              transcriptLines.push(`${studentResult.studentName} (no match in roster)`);
+              console.log(`${logPrefix} ❌ Student not in roster: ${studentResult.studentName}`);
             }
           });
 
@@ -2770,9 +2818,30 @@
             }
 
             console.log(`${logPrefix} ===== SUMMARY: ${matchedStudents.length}/${studentsData.length} students matched and graded =====`);
+            console.log(`${logPrefix} Invalid entries count: ${invalidEntriesCount}`);
           } else {
-            // No students matched - check if this needs review (has raw transcript)
-            const needsReview = !!rawTranscript || !!unmatchedGradeData;
+            // No students matched - check if this needs review
+            // This happens when:
+            // 1. studentsData exists but couldn't match any students in roster
+            // 2. All studentsData entries were invalid (missing studentName or scores)
+            // 3. We have a raw transcript or unmatched grade data
+            const hasInvalidOrUnmatchedData = studentsData.length > 0 && matchedStudents.length === 0;
+            const needsReview = !!rawTranscript || !!unmatchedGradeData || hasInvalidOrUnmatchedData;
+            console.log(`${logPrefix} needsReview check: rawTranscript=${!!rawTranscript}, unmatchedGradeData=${!!unmatchedGradeData}, hasInvalidOrUnmatchedData=${hasInvalidOrUnmatchedData}`);
+            // Capture any unmatched grade data from studentsData
+            let capturedGradeData = unmatchedGradeData;
+            if (!capturedGradeData && studentsData.length > 0) {
+              // Try to extract grade data from the first entry in studentsData
+              const firstEntry = studentsData[0];
+              if (firstEntry && firstEntry.scores) {
+                capturedGradeData = {
+                  scores: firstEntry.scores,
+                  comments: firstEntry.comments || ''
+                };
+                console.log(`${logPrefix} Captured grade data from unmatched studentsData:`, capturedGradeData);
+              }
+            }
+
             setTranscript(prev => {
               const filtered = prev.filter(e => e.id !== entryId);
               const existing = prev.find(e => e.id === entryId);
@@ -2792,7 +2861,7 @@
                   // Mark as needs review if we have transcript but no match
                   needsReview: needsReview,
                   rawTranscript: rawTranscript || existing?.rawTranscript || null,
-                  unmatchedGradeData: unmatchedGradeData || existing?.unmatchedGradeData || null
+                  unmatchedGradeData: capturedGradeData || existing?.unmatchedGradeData || null
                 },
                 ...filtered
               ];
@@ -4969,6 +5038,59 @@
                 })
               )}
             </div>
+
+            {/* Needs Review Section */}
+            {(() => {
+              const needsReviewEntries = transcript.filter(entry => entry.needsReview && !entry.isProcessing);
+              if (needsReviewEntries.length === 0) return null;
+
+              return (
+                <div className="border-t border-gray-200 p-3 bg-amber-50">
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-sm font-semibold text-amber-800 flex items-center gap-1">
+                      <Icon name="AlertTriangle" className="w-4 h-4" />
+                      Needs Review
+                    </h4>
+                    <span className="text-xs text-white bg-amber-600 rounded-full px-2 py-0.5">{needsReviewEntries.length}</span>
+                  </div>
+                  <div className="space-y-2 max-h-56 overflow-y-auto">
+                    {needsReviewEntries.map((entry) => (
+                      <div key={entry.id} className="p-2 rounded bg-white border border-amber-400 text-xs">
+                        <div className="flex items-start justify-between gap-2 mb-2">
+                          <div className="flex-1">
+                            <div className="font-semibold text-amber-800 mb-1">⚠️ No student match</div>
+                            {entry.rawTranscript && (
+                              <div className="text-pacifica-slate italic line-clamp-2">
+                                "{entry.rawTranscript.substring(0, 80)}{entry.rawTranscript.length > 80 ? '...' : ''}"
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => {
+                            setNameCorrectionData({
+                              entryId: entry.id,
+                              originalStudentId: null,
+                              originalStudentName: null,
+                              gradeData: entry.unmatchedGradeData || null,
+                              transcriptText: entry.rawTranscript,
+                              isNeedsReview: true
+                            });
+                            setNameCorrectionQuery('');
+                            setShowNameCorrectionModal(true);
+                          }}
+                          className="w-full px-2 py-1 bg-amber-500 text-white text-xs font-medium rounded hover:bg-amber-600 transition-colors flex items-center justify-center gap-1"
+                        >
+                          <Icon name="UserPlus" className="w-3 h-3" />
+                          Select Student
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+
             <div className="border-t border-gray-200 p-3">
               <div className="flex items-center justify-between mb-2">
                 <h4 className="text-sm font-semibold text-pacifica-navy">Audio Queue</h4>
@@ -5110,9 +5232,35 @@
                                     <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold ${sg.completed ? 'bg-green-600 text-white' : 'bg-pacifica-gray text-pacifica-navy'}`}>
                                       {sg.completed ? '✓' : getInitials(student.name)}
                                     </div>
-                                    <div className="min-w-0">
-                                      <p className="font-medium text-sm text-pacifica-navy truncate">{student.name}</p>
-                                      <p className="text-xs text-pacifica-slate">{student.studentId}</p>
+                                    <div className="min-w-0 flex-1">
+                                      <button
+                                        onClick={() => {
+                                          // Find the transcript entry that created this grade
+                                          const transcriptEntry = transcript.find(entry =>
+                                            entry.matchedGrades?.some(mg => mg.studentId === student.id)
+                                          );
+
+                                          if (transcriptEntry) {
+                                            const matchedGrade = transcriptEntry.matchedGrades.find(mg => mg.studentId === student.id);
+                                            setNameCorrectionData({
+                                              entryId: transcriptEntry.id,
+                                              originalStudentId: student.id,
+                                              originalStudentName: student.name,
+                                              gradeData: matchedGrade?.gradeData || sg,
+                                              transcriptText: transcriptEntry.rawTranscript
+                                            });
+                                            setNameCorrectionQuery('');
+                                            setShowNameCorrectionModal(true);
+                                          } else {
+                                            alert('Cannot find the original transcript entry for this student. Try clicking on the student name in the transcript panel instead.');
+                                          }
+                                        }}
+                                        className="text-left w-full hover:bg-pacifica-orange hover:bg-opacity-10 rounded px-1 py-0.5 transition-colors group"
+                                        title="Click to change student attribution"
+                                      >
+                                        <p className="font-medium text-sm text-pacifica-navy truncate group-hover:text-pacifica-orange transition-colors">{student.name}</p>
+                                        <p className="text-xs text-pacifica-slate">ID: {student.studentId}</p>
+                                      </button>
                                     </div>
                                   </div>
                                 </td>
@@ -5541,6 +5689,23 @@
 
           // If this is a "needs review" entry with transcript, resend to webhook with student suggestion
           if (isNeedsReview && transcriptText) {
+            // Close modal and show processing state immediately
+            setShowNameCorrectionModal(false);
+            setNameCorrectionData(null);
+            setNameCorrectionQuery('');
+
+            // Update the transcript entry to show it's being reprocessed
+            setTranscript(prev => prev.map(entry =>
+              entry.id === entryId
+                ? {
+                    ...entry,
+                    text: `⏳ Reprocessing with student: ${newStudent.name}...`,
+                    isProcessing: true,
+                    needsReview: false
+                  }
+                : entry
+            ));
+
             setIsResubmittingTranscript(true);
 
             try {
@@ -5578,26 +5743,39 @@
               }, WEBHOOK_TIMEOUT_MS);
 
               if (response.ok) {
-                console.log('[Name Correction] Transcript resubmitted successfully');
-                // Update the transcript entry to show it's being reprocessed
+                const result = await response.json();
+                console.log('[Name Correction] Transcript resubmitted successfully, result:', result);
+
+                // Process the webhook response
+                handleWebhookSuccess({
+                  result,
+                  entryId,
+                  sourceLabel: `Reprocessed for ${newStudent.name}`,
+                  appendTranscript: false,
+                  entryProcessingState: 'complete'
+                });
+              } else {
+                console.error('[Name Correction] Failed to resubmit transcript:', response.status, response.statusText);
+                // Mark entry as error
                 setTranscript(prev => prev.map(entry =>
                   entry.id === entryId
                     ? {
                         ...entry,
-                        text: `⏳ Reprocessing with student: ${newStudent.name}...`,
-                        isProcessing: true,
-                        needsReview: false
+                        text: `❌ Failed to reprocess transcript`,
+                        isProcessing: false,
+                        needsReview: true
                       }
                     : entry
                 ));
-              } else {
-                console.error('[Name Correction] Failed to resubmit transcript');
               }
             } catch (err) {
               console.error('[Name Correction] Error resubmitting transcript:', err);
             } finally {
               setIsResubmittingTranscript(false);
             }
+
+            // Modal already closed, exit early
+            return;
           } else if (gradeData) {
             // Transfer grade from original student to new student
             const normalizedScores = normalizeScoresMap(gradeData.scores);
