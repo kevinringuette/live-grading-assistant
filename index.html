@@ -2809,6 +2809,7 @@
         } else {
           // No students data at all - check if webhook returned raw transcript (needs review)
           const needsReview = !!rawTranscript || !!unmatchedGradeData;
+          console.log(`${logPrefix} Creating transcript entry with needsReview=${needsReview}, rawTranscript=${!!rawTranscript}, entryId=${entryId}`);
           setTranscript(prev => {
             const filtered = prev.filter(e => e.id !== entryId);
             const existing = prev.find(e => e.id === entryId);
@@ -2818,17 +2819,19 @@
             const combinedText = appendTranscript && existing
               ? `${existing.text}\n${baseText}`
               : baseText;
+            const newEntry = {
+              id: entryId,
+              text: combinedText,
+              isProcessing: entryProcessingState !== 'complete',
+              segmentNumber: chunkNum,
+              timestamp: new Date().toLocaleTimeString(),
+              needsReview: needsReview,
+              rawTranscript: rawTranscript || existing?.rawTranscript || null,
+              unmatchedGradeData: unmatchedGradeData || existing?.unmatchedGradeData || null
+            };
+            console.log(`${logPrefix} New entry object:`, { id: newEntry.id, needsReview: newEntry.needsReview, rawTranscript: !!newEntry.rawTranscript });
             return [
-              {
-                id: entryId,
-                text: combinedText,
-                isProcessing: entryProcessingState !== 'complete',
-                segmentNumber: chunkNum,
-                timestamp: new Date().toLocaleTimeString(),
-                needsReview: needsReview,
-                rawTranscript: rawTranscript || existing?.rawTranscript || null,
-                unmatchedGradeData: unmatchedGradeData || existing?.unmatchedGradeData || null
-              },
+              newEntry,
               ...filtered
             ];
           });
