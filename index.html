@@ -5179,9 +5179,35 @@
                                     <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold ${sg.completed ? 'bg-green-600 text-white' : 'bg-pacifica-gray text-pacifica-navy'}`}>
                                       {sg.completed ? '✓' : getInitials(student.name)}
                                     </div>
-                                    <div className="min-w-0">
-                                      <p className="font-medium text-sm text-pacifica-navy truncate">{student.name}</p>
-                                      <p className="text-xs text-pacifica-slate">{student.studentId}</p>
+                                    <div className="min-w-0 flex-1">
+                                      <button
+                                        onClick={() => {
+                                          // Find the transcript entry that created this grade
+                                          const transcriptEntry = transcript.find(entry =>
+                                            entry.matchedGrades?.some(mg => mg.studentId === student.id)
+                                          );
+
+                                          if (transcriptEntry) {
+                                            const matchedGrade = transcriptEntry.matchedGrades.find(mg => mg.studentId === student.id);
+                                            setNameCorrectionData({
+                                              entryId: transcriptEntry.id,
+                                              originalStudentId: student.id,
+                                              originalStudentName: student.name,
+                                              gradeData: matchedGrade?.gradeData || sg,
+                                              transcriptText: transcriptEntry.rawTranscript
+                                            });
+                                            setNameCorrectionQuery('');
+                                            setShowNameCorrectionModal(true);
+                                          } else {
+                                            alert('Cannot find the original transcript entry for this student. Try clicking on the student name in the transcript panel instead.');
+                                          }
+                                        }}
+                                        className="text-left w-full hover:bg-pacifica-orange hover:bg-opacity-10 rounded px-1 py-0.5 transition-colors group"
+                                        title="Click to change student attribution"
+                                      >
+                                        <p className="font-medium text-sm text-pacifica-navy truncate group-hover:text-pacifica-orange transition-colors">{student.name}</p>
+                                        <p className="text-xs text-pacifica-slate">ID: {student.studentId}</p>
+                                      </button>
                                     </div>
                                   </div>
                                 </td>
@@ -5210,6 +5236,121 @@
                         )}
                       </tbody>
                     </table>
+                  </div>
+                </div>
+
+                {/* Live Transcript Section */}
+                <div className="bg-white rounded-lg shadow-md border border-pacifica-gray p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-lg font-semibold text-pacifica-navy">Live Transcript</h2>
+                    <span className="text-sm text-pacifica-slate">Session: {sessionId || 'Not started'}</span>
+                  </div>
+
+                  <div className="h-96 overflow-y-auto bg-pacifica-gray bg-opacity-10 rounded p-4 text-sm space-y-3">
+                    {transcript.length === 0 ? (
+                      <p className="text-pacifica-gray italic">{isRecording ? 'Press SPACEBAR to process...' : 'Start recording'}</p>
+                    ) : (
+                      transcript.map((entry) => {
+                        // Debug logging for entries with special properties
+                        if (entry.needsReview || entry.rawTranscript || entry.matchedGrades?.length > 0) {
+                          console.log('[Render] Entry:', {
+                            id: entry.id,
+                            needsReview: entry.needsReview,
+                            isProcessing: entry.isProcessing,
+                            matchedGradesCount: entry.matchedGrades?.length || 0,
+                            rawTranscript: entry.rawTranscript?.substring(0, 50),
+                            text: entry.text?.substring(0, 50)
+                          });
+                        }
+                        return (
+                        <div
+                          key={entry.id}
+                          className={`p-3 rounded-lg border ${entry.isProcessing
+                            ? 'bg-pacifica-canary bg-opacity-10 border-pacifica-canary animate-pulse'
+                            : entry.needsReview
+                              ? 'bg-amber-50 border-amber-400'
+                              : 'bg-white border-pacifica-gray'
+                            }`}
+                        >
+                          {entry.timestamp && (
+                            <div className="text-xs text-pacifica-slate mb-1 font-mono">{entry.timestamp}</div>
+                          )}
+
+                          {/* Render matched grades with clickable student names */}
+                          {entry.matchedGrades && entry.matchedGrades.length > 0 ? (
+                            <div className="space-y-1">
+                              {/* Header line */}
+                              <p className="text-pacifica-navy font-medium">
+                                {entry.text.split('\n')[0]}
+                              </p>
+                              {/* Clickable student entries */}
+                              {entry.matchedGrades.map((mg, idx) => (
+                                <div key={idx} className="flex items-center gap-2 pl-4">
+                                  <span className="text-pacifica-slate">•</span>
+                                  <button
+                                    onClick={() => {
+                                      setNameCorrectionData({
+                                        entryId: entry.id,
+                                        originalStudentId: mg.studentId,
+                                        originalStudentName: mg.studentName,
+                                        gradeData: mg.gradeData,
+                                        transcriptText: entry.rawTranscript
+                                      });
+                                      setNameCorrectionQuery('');
+                                      setShowNameCorrectionModal(true);
+                                    }}
+                                    className="text-pacifica-navy hover:text-pacifica-orange hover:underline font-medium cursor-pointer transition-colors"
+                                    title="Click to change student name"
+                                  >
+                                    {mg.studentName}
+                                  </button>
+                                  <span className="text-pacifica-slate text-xs">
+                                    ({Object.entries(mg.gradeData.scores).map(([k, v]) => `${k}: ${v}`).join(', ')})
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-pacifica-navy whitespace-pre-line leading-relaxed">{entry.text}</p>
+                          )}
+
+                          {/* Needs Review button for unmatched transcripts */}
+                          {entry.needsReview && !entry.isProcessing && (
+                            <div className="mt-3 pt-3 border-t border-amber-200">
+                              <div className="flex items-center justify-between">
+                                <div className="text-xs text-amber-700">
+                                  <span className="font-medium">⚠️ Couldn't identify student name</span>
+                                  {entry.rawTranscript && (
+                                    <p className="mt-1 text-amber-600 italic truncate max-w-xs">
+                                      "{entry.rawTranscript.substring(0, 100)}{entry.rawTranscript.length > 100 ? '...' : ''}"
+                                    </p>
+                                  )}
+                                </div>
+                                <button
+                                  onClick={() => {
+                                    setNameCorrectionData({
+                                      entryId: entry.id,
+                                      originalStudentId: null,
+                                      originalStudentName: null,
+                                      gradeData: entry.unmatchedGradeData || null,
+                                      transcriptText: entry.rawTranscript,
+                                      isNeedsReview: true
+                                    });
+                                    setNameCorrectionQuery('');
+                                    setShowNameCorrectionModal(true);
+                                  }}
+                                  className="px-3 py-1.5 bg-amber-500 text-white text-xs font-medium rounded hover:bg-amber-600 transition-colors flex items-center gap-1"
+                                >
+                                  <Icon name="UserPlus" className="w-3 h-3" />
+                                  Select Student
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        );
+                      })
+                    )}
                   </div>
                 </div>
               </div>
